@@ -1,0 +1,39 @@
+services:
+  # Background worker: runs the Telegram bot (polling mode, no HTTP port needed)
+  - type: worker
+    name: fms-telegram-bot
+    env: python
+    plan: free
+    buildCommand: pip install -r requirements.txt
+    startCommand: python -m app.main
+    envVars:
+      - key: TELEGRAM_BOT_TOKEN
+        sync: false
+      - key: AUTHORIZED_CHAT_IDS
+        sync: false
+      - key: AUTHORIZED_USER_IDS
+        sync: false
+      - key: TEST_CHAT_ID
+        sync: false
+      - key: DATABASE_URL
+        fromDatabase:
+          name: fms-db
+          property: connectionString
+      - key: DRY_RUN
+        value: "false"
+      - key: LANGUAGE
+        value: "both"
+
+  # Optional: separate lightweight web service just for a health check endpoint
+  - type: web
+    name: fms-health
+    env: python
+    plan: free
+    buildCommand: pip install -r requirements.txt
+    startCommand: uvicorn app.healthcheck:app --host 0.0.0.0 --port $PORT
+
+databases:
+  - name: fms-db
+    plan: free
+    databaseName: fms
+    user: fms
