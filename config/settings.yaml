@@ -1,0 +1,19 @@
+workbook:
+  active_sheet: "Sheet1"
+  required_extension: [".xlsx", ".xlsm"]
+
+digest:
+  enabled: true
+  top_n_critical: 5
+
+summary:
+  send_after_every_upload: true
+
+identity:
+  primary_key: rfid
+  fallback_composite: [slip_no, rfid]
+  note: >
+    RFID alone is 98.5% unique in the source data (1498/1505). Remaining
+    collisions are logged as DQ_003 anomalies rather than silently deduped,
+    since inspection showed they are near-identical duplicate row entries
+    (same item logged twice within ~1 minute).

@@ -1,0 +1,221 @@
+# ============================================================================
+# FMS BUSINESS RULE INVENTORY
+# ============================================================================
+# Derived from actual analysis of data_tailor.xlsx (1505 rows, 24 cols).
+# Thresholds below are DEFAULTS -- not validated against your real SLA policy.
+# Change freely; nothing in code assumes these exact numbers.
+# ============================================================================
+
+# Reminder thresholds before a deadline, in minutes. Applied per severity tier.
+reminder_thresholds:
+  normal:
+    - {minutes: 1440, label: "24h", severity: INFO}
+    - {minutes: 360,  label: "6h",  severity: WARNING}
+    - {minutes: 60,   label: "1h",  severity: URGENT}
+  urgent:
+    - {minutes: 720, label: "12h", severity: WARNING}
+    - {minutes: 180, label: "3h",  severity: URGENT}
+    - {minutes: 30,  label: "30m", severity: CRITICAL}
+
+overdue_severity: OVERDUE
+
+rules:
+  # -------------------- RULE_001: SLIP -> TAILOR RECEIPT SLA --------------------
+  # Confirmed with user 16-Aug-2026 (Hinglish spec, translated below):
+  #   Applies to ALL items except plain sarees (SAREE, RMN-D.SAREE, SAREE(NO LESS)) --
+  #   SAREE BLOUSE SET / SAREE STITCH are stitching jobs and ARE covered by this rule.
+  #   Same 1-hour window for BOTH Normal and Urgent slips (no severity split by slip_type here).
+  #   reference_time = SEND TO AGENCY time if present, else ALTERATION SLIP DATE (slip-cut time).
+  #   deadline = reference_time + 60 minutes.
+  #   RECEIVED BY TAILOR must happen before that deadline.
+  #   Alert #1: 5 minutes before deadline, if still not received -> CRITICAL alert.
+  #   Alert #2: if deadline passes and still not received -> escalate to MOST_URGENT (overdue).
+  - id: RULE_001
+    name: "Slip to Tailor receipt within 1 hour"
+    category: AGENCY_TO_TAILOR_SLA
+    stage: TAILOR
+    enabled: true
+    window_minutes: 60
+    pre_deadline_alert_minutes: 5
+    excluded_items: ["SAREE", "RMN-D.SAREE", "SAREE(NO LESS)"]
+    severity_pre_deadline: CRITICAL
+    severity_overdue: MOST_URGENT
+
+  # -------------------- RULE_002: TAILOR STAGE COMPLETION DEADLINE --------------------
+  # Confirmed with user 16-Aug-2026 (Hinglish spec, translated below):
+  #   Once RECEIVED BY TAILOR is ticked, watch TAILOR DATE (assigned deadline).
+  #   Same thresholds for BOTH Normal and Urgent (no slip_type split here).
+  #   Alert #1: 20 minutes before TAILOR DATE, if TAILOR COMPLETE still empty -> alert.
+  #   Alert #2: 10 minutes before TAILOR DATE, if still not complete -> escalate to MOST_URGENT.
+  #   Alert #3: at/after TAILOR DATE (deadline reached), if still not complete -> alert (overdue).
+  - id: RULE_002
+    name: "Tailor stage completion deadline"
+    category: STAGE_DEADLINE_TIERED
+    stage: TAILOR
+    enabled: true
+    deadline_field: tailor_deadline
+    complete_field: tailor_complete
+    tiers:
+      - {minutes: 20, label: "20m_pre_deadline", severity: URGENT}
+      - {minutes: 10, label: "10m_pre_deadline", severity: MOST_URGENT}
+    overdue_severity: MOST_URGENT
+
+  # -------------------- OTHER PROCESS-PENDING RULES (defaults, pending confirmation) --------------------
+  - id: RULE_003
+    name: "Agency stage pending"
+    category: PROCESS_PENDING
+    stage: AGENCY
+    enabled: true
+    condition: "sent_to_agency is not null AND received_by_tailor is null"
+    severity: INFO
+
+  - id: RULE_004
+    name: "Finishing stage pending"
+    category: PROCESS_PENDING
+    stage: FINISHING
+    enabled: true
+    condition: "tailor_complete is not null AND finishing_complete is null"
+    severity: INFO
+
+  - id: RULE_005
+    name: "Packing stage pending"
+    category: PROCESS_PENDING
+    stage: PACKING
+    enabled: true
+    condition: "finishing_complete is not null AND packing_complete is null"
+    severity: INFO
+
+  - id: RULE_006
+    name: "Delivery stage pending"
+    category: PROCESS_PENDING
+    stage: DELIVERY
+    enabled: true
+    condition: "packing_complete is not null AND delivered_customer is null"
+    severity: INFO
+
+  # -------------------- DEADLINE / SLA RULES (defaults -- awaiting your exact numbers) --------------------
+  # -------------------- RULE_007: FINISHING STAGE COMPLETION DEADLINE --------------------
+  # Confirmed with user 16-Aug-2026 (Hinglish spec, translated below):
+  #   Same pattern as RULE_002 (Tailor), applied to FINISHING DATE / FINISHING COMPLETE.
+  #   Same thresholds for BOTH Normal and Urgent (no slip_type split).
+  #   3 alerts total:
+  #   Alert #1: 15 minutes before FINISHING DATE, if not complete -> alert.
+  #   Alert #2: at FINISHING DATE (deadline reached), if still not complete -> alert.
+  #   Alert #3: 15 minutes AFTER FINISHING DATE passes, if still not complete -> alert again.
+  - id: RULE_007
+    name: "Finishing stage completion deadline"
+    category: STAGE_DEADLINE_TIERED
+    stage: FINISHING
+    enabled: true
+    deadline_field: finishing_deadline
+    complete_field: finishing_complete
+    tiers:
+      - {minutes: 15, label: "15m_pre_deadline", severity: URGENT}
+    overdue_tiers:
+      - {minutes: 0,  label: "OVERDUE", severity: MOST_URGENT}
+      - {minutes: 15, label: "15m_post_deadline", severity: MOST_URGENT}
+
+  - id: RULE_008
+    name: "QC / Packing deadline approaching / breached"
+    category: DEADLINE
+    stage: PACKING
+    enabled: true
+    deadline_field: qc_deadline
+    complete_field: packing_complete
+    required_columns: [qc_deadline, packing_complete, slip_type]
+    note: "QC DEADLINE doubles as the effective packing-stage deadline (confirmed via PACKING HRS regression)."
+
+  # -------------------- RULE_009: DELIVERY DATE vs DELIVERED TO CUSTOMER --------------------
+  # Confirmed with user 16-Aug-2026 (Hinglish spec, translated below):
+  #   For every delivery, if it hasn't happened 4 hours before DELIVERY DATE -> reminder.
+  #   User only asked for this one reminder explicitly. An overdue alert (delivery date
+  #   passed and still not delivered) is included below as a sane default -- flag if you
+  #   want this OFF, same as we did for RULE_011.
+  - id: RULE_009
+    name: "Delivery reminder - 4 hours before Delivery Date"
+    category: STAGE_DEADLINE_TIERED
+    stage: DELIVERY
+    enabled: true
+    deadline_field: delivery_deadline
+    complete_field: delivered_customer
+    tiers:
+      - {minutes: 240, label: "4h_pre_delivery", severity: URGENT}
+    overdue_severity: MOST_URGENT
+
+  # -------------------- URGENT ESCALATION --------------------
+  - id: RULE_010
+    name: "Urgent slip tighter monitoring"
+    category: ESCALATION
+    enabled: true
+    condition: "slip_type == 'Urgent' AND any pending stage"
+    effect: "use urgent reminder_thresholds tier instead of normal"
+
+  # -------------------- RULE_011: PACKING COMPLETION vs DELIVERY DATE --------------------
+  # Confirmed with user 16-Aug-2026 (Hinglish spec, translated below):
+  #   Tracks whether PACKING COMPLETE has happened, measured against DELIVERY DATE
+  #   (not QC DEADLINE -- that's a separate check, RULE_008). This is specifically
+  #   about giving enough lead time before the delivery is due.
+  #   2 reminders only (user did not ask for a post-deadline/overdue alert here --
+  #   RULE_009 already separately tracks actual delivery vs delivery deadline):
+  #   Alert #1: 24 hours (1 day) before DELIVERY DATE, if packing not complete.
+  #   Alert #2: 4 hours before DELIVERY DATE, if packing still not complete.
+  - id: RULE_011
+    name: "Packing completion vs Delivery Date (lead-time reminders)"
+    category: STAGE_DEADLINE_TIERED
+    stage: PACKING
+    enabled: true
+    deadline_field: delivery_deadline
+    complete_field: packing_complete
+    suppress_overdue: true
+    tiers:
+      - {minutes: 1440, label: "24h_pre_delivery", severity: WARNING}
+      - {minutes: 240,  label: "4h_pre_delivery",  severity: URGENT}
+
+  # -------------------- RULE_012: TAILOR COMPLETE WITHOUT A TAILOR DATE --------------------
+  # Confirmed with user 16-Aug-2026 (Hinglish spec, translated below):
+  #   Checked on every uploaded sheet. If TAILOR DATE (deadline) is empty but
+  #   TAILOR COMPLETE has a time filled in anyway, that's a data problem worth
+  #   surfacing as a BUSINESS alert (not silently logged as DQ_006) -- user
+  #   explicitly wants this as URGENT, confirmed no SEND TO AGENCY filter applies.
+  - id: RULE_012
+    name: "Tailor completed with no Tailor Date on record"
+    category: MISSING_DEADLINE_ALERT
+    stage: TAILOR
+    enabled: true
+    deadline_field: tailor_deadline
+    complete_field: tailor_complete
+    severity: URGENT
+
+# ============================================================================
+# DATA QUALITY RULES (separate from business alerts, prefix DQ_)
+# ============================================================================
+dq_rules:
+  - id: DQ_001
+    name: "Completion before previous stage completion"
+    description: "e.g. finishing_complete earlier than tailor_complete"
+    severity: DATA_QUALITY
+
+  - id: DQ_002
+    name: "Missing responsible person on completed stage"
+    description: "tailor_complete set but tailor_name empty (or equivalent for finish_name)"
+    severity: DATA_QUALITY
+
+  - id: DQ_003
+    name: "Duplicate RFID"
+    description: "Same RFID appears on 2+ rows -- observed 7 cases in current workbook, all near-identical duplicate entries"
+    severity: DATA_QUALITY
+
+  - id: DQ_004
+    name: "Duplicate slip_no + RFID composite"
+    description: "Composite identity collision -- should be effectively zero; investigate if nonzero"
+    severity: DATA_QUALITY
+
+  - id: DQ_005
+    name: "Delivered before packing complete"
+    description: "delivered_customer timestamp earlier than packing_complete"
+    severity: DATA_QUALITY
+
+  - id: DQ_006
+    name: "Missing deadline on active record"
+    description: "Stage started (has a *_complete upstream) but downstream deadline field is null"
+    severity: DATA_QUALITY
