@@ -1,0 +1,44 @@
+import os
+import yaml
+
+BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+
+def _env_list(name: str) -> list[str]:
+    raw = os.environ.get(name, "")
+    return [x.strip() for x in raw.split(",") if x.strip()]
+
+
+class Settings:
+    TELEGRAM_BOT_TOKEN: str = os.environ.get("TELEGRAM_BOT_TOKEN", "")
+    AUTHORIZED_CHAT_IDS: list[str] = _env_list("AUTHORIZED_CHAT_IDS")
+    AUTHORIZED_USER_IDS: list[str] = _env_list("AUTHORIZED_USER_IDS")
+    TEST_CHAT_ID: str = os.environ.get("TEST_CHAT_ID", "")
+
+    DATABASE_URL: str = os.environ.get("DATABASE_URL", "sqlite:///./fms_state.db")
+
+    DRY_RUN: bool = os.environ.get("DRY_RUN", "false").lower() == "true"
+    LANGUAGE: str = os.environ.get("LANGUAGE", "both")  # en | hi | both
+
+    ACTIVE_SHEET: str = os.environ.get("ACTIVE_SHEET", "Sheet1")
+
+    # optional between-upload time-based re-evaluation (section 35)
+    ENABLE_TIME_BASED_MONITORING: bool = os.environ.get(
+        "ENABLE_TIME_BASED_MONITORING", "false"
+    ).lower() == "true"
+    TIME_BASED_CHECK_INTERVAL_MINUTES: int = int(
+        os.environ.get("TIME_BASED_CHECK_INTERVAL_MINUTES", "15")
+    )
+
+    LOG_LEVEL: str = os.environ.get("LOG_LEVEL", "INFO")
+
+    TEMP_DIR: str = os.environ.get("TEMP_DIR", "/tmp/fms_uploads")
+
+
+def load_rules_config() -> dict:
+    path = os.path.join(BASE_DIR, "config", "rules.yaml")
+    with open(path, "r", encoding="utf-8") as f:
+        return yaml.safe_load(f)
+
+
+settings = Settings()
