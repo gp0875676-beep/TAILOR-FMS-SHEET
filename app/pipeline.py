@@ -131,6 +131,9 @@ def process_upload(session, file_path: str, filename: str, telegram_user_id: str
         upload.updated_records = summary["updated_records"]
         upload.completed_records = summary["completed_records"]
         upload.new_alerts = summary["new_alerts"]
+        upload.duplicates_suppressed = summary["duplicates_suppressed"]
+        upload.anomaly_count = summary["anomaly_count"]
+        upload.stopped_items_count = len(stopped_items)
         session.commit()
 
         send_fn(telegram_chat_id, render_upload_summary(summary))
