@@ -24,6 +24,9 @@ class Upload(Base):
     updated_records = Column(Integer, default=0)
     completed_records = Column(Integer, default=0)
     new_alerts = Column(Integer, default=0)
+    duplicates_suppressed = Column(Integer, default=0)
+    anomaly_count = Column(Integer, default=0)
+    stopped_items_count = Column(Integer, default=0)
     errors = Column(Text)
 
 
