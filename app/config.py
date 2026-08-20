@@ -34,6 +34,13 @@ class Settings:
 
     TEMP_DIR: str = os.environ.get("TEMP_DIR", "/tmp/fms_uploads")
 
+    # Confirmed with user 20-Aug-2026: individual Telegram alerts (the ones
+    # that flood the chat) should ONLY fire for records whose ALTERATION SLIP
+    # DATE is within this many days of "now". Older records (a big historical
+    # backfill upload, for example) still show up in the Stopped Items /
+    # Pending Report -- they just don't generate a per-record ping.
+    RECENT_ALERT_WINDOW_DAYS: int = int(os.environ.get("RECENT_ALERT_WINDOW_DAYS", "7"))
+
 
 def load_rules_config() -> dict:
     path = os.path.join(BASE_DIR, "config", "rules.yaml")
