@@ -1,320 +1,59 @@
 import os
+import sys
+import time
 import logging
-import asyncio
-from datetime import datetime
+import threading
 
-from telegram import Update
-from telegram.ext import (
-    Application, CommandHandler, MessageHandler, ContextTypes, filters
-)
-from telegram.request import HTTPXRequest
+import uvicorn
 
 from app.config import settings
-from app.db import get_session
-from app.validator import validate_extension
-from app.pipeline import process_upload, ProcessingError
-from app.models import Upload, RecordSnapshot, Anomaly
+from app.db import init_db
+from app.telegram_bot import build_app
+from app.healthcheck import app as health_app
 
-logger = logging.getLogger("fms_bot")
-
-# simple in-process lock so two uploads never process concurrently (section 41)
-_processing_lock = asyncio.Lock()
-
-
-def _is_authorized(update: Update) -> bool:
-    user_id = str(update.effective_user.id) if update.effective_user else ""
-    chat_id = str(update.effective_chat.id) if update.effective_chat else ""
-    if settings.AUTHORIZED_USER_IDS and user_id in settings.AUTHORIZED_USER_IDS:
-        return True
-    if settings.AUTHORIZED_CHAT_IDS and chat_id in settings.AUTHORIZED_CHAT_IDS:
-        return True
-    return False
+logging.basicConfig(
+    level=getattr(logging, settings.LOG_LEVEL, logging.INFO),
+    format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+)
+logger = logging.getLogger("fms_main")
 
 
-async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not _is_authorized(update):
-        await update.message.reply_text("❌ Unauthorized.")
-        return
-    await update.message.reply_text(
-        "🤖 FMS Bot ready.\nSend me the FMS Excel file (.xlsx) to process an upload.\n"
-        "Commands: /status /pending /urgent /overdue /summary /lastupload /health /rules"
-    )
+def _run_health_server():
+    """Render's free tier only offers free Web Services (not Background
+    Workers), which means this process MUST bind to $PORT and answer HTTP
+    requests or Render's health check will keep restarting it. This runs a
+    tiny FastAPI health endpoint in a background thread so the main thread
+    is free to run the Telegram bot's polling loop."""
+    port = int(os.environ.get("PORT", "10000"))
+    logger.info(f"Starting health check server on port {port}...")
+    uvicorn.run(health_app, host="0.0.0.0", port=port, log_level="warning")
 
 
-async def cmd_health(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not _is_authorized(update):
-        await update.message.reply_text("❌ Unauthorized.")
-        return
-    await update.message.reply_text("✅ Bot is online.")
+def main():
+    # Start the health server FIRST, before any DB work. Render's deploy
+    # health check starts probing $PORT almost immediately -- if the port
+    # isn't listening yet because we're still doing DB schema
+    # inspection/migration (see app/db.py's _migrate_uploads_table, which
+    # talks to Postgres over the network), Render can decide the deploy is
+    # unhealthy and kill+restart it before the bot ever gets a chance to run.
+    health_thread = threading.Thread(target=_run_health_server, daemon=True)
+    health_thread.start()
+    time.sleep(0.5)  # small grace period for uvicorn to actually bind the port
+
+    logger.info("Initializing database...")
+    init_db()
+
+    logger.info("Starting Telegram bot (polling)...")
+    application = build_app()
+    application.run_polling(drop_pending_updates=True)
 
 
-async def cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not _is_authorized(update):
-        await update.message.reply_text("❌ Unauthorized.")
-        return
-    session = get_session()
+if __name__ == "__main__":
     try:
-        last_upload = session.query(Upload).order_by(Upload.id.desc()).first()
-        pending = session.query(RecordSnapshot).filter(
-            RecordSnapshot.status == "PENDING", RecordSnapshot.is_removed == False  # noqa: E712
-        ).count()
-
-        if not last_upload:
-            await update.message.reply_text("🤖 FMS BOT STATUS\n\nBot: ONLINE\nNo uploads yet.")
-            return
-
-        text = (
-            "🤖 FMS BOT STATUS\n\n"
-            "Bot: ONLINE\n"
-            f"Last Excel: {last_upload.upload_timestamp}\n"
-            f"Last File: {last_upload.filename}\n"
-            f"Rows: {last_upload.row_count}\n"
-            f"Last Processing: {last_upload.processing_status}\n"
-            f"Pending: {pending}\n"
-            "Database: CONNECTED\n"
-            f"Last Error: {last_upload.errors or 'None'}"
-        )
-        await update.message.reply_text(text)
-    finally:
-        session.close()
-
-
-async def cmd_pending(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await _stage_list(update, status_filter="PENDING")
-
-
-async def cmd_urgent(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not _is_authorized(update):
-        await update.message.reply_text("❌ Unauthorized.")
-        return
-    session = get_session()
-    try:
-        rows = session.query(RecordSnapshot).filter(
-            RecordSnapshot.status == "PENDING",
-            RecordSnapshot.slip_type == "Urgent",
-            RecordSnapshot.is_removed == False,  # noqa: E712
-        ).limit(30).all()
-        if not rows:
-            await update.message.reply_text("No urgent pending items.")
-            return
-        lines = [f"🚨 URGENT PENDING ({len(rows)} shown, max 30)", ""]
-        for r in rows:
-            lines.append(f"Slip {r.slip_no} — {r.stage}")
-        await update.message.reply_text("\n".join(lines))
-    finally:
-        session.close()
-
-
-async def cmd_overdue(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not _is_authorized(update):
-        await update.message.reply_text("❌ Unauthorized.")
-        return
-    from app.models import AlertHistory
-    session = get_session()
-    try:
-        rows = session.query(AlertHistory).filter_by(alert_stage="OVERDUE", status="ACTIVE").limit(30).all()
-        if not rows:
-            await update.message.reply_text("No active overdue alerts.")
-            return
-        lines = [f"🔴 OVERDUE ({len(rows)} shown, max 30)", ""]
-        for r in rows:
-            lines.append(f"{r.record_id} — rule {r.rule_id}")
-        await update.message.reply_text("\n".join(lines))
-    finally:
-        session.close()
-
-
-async def _stage_list(update: Update, status_filter: str):
-    if not _is_authorized(update):
-        await update.message.reply_text("❌ Unauthorized.")
-        return
-    session = get_session()
-    try:
-        rows = session.query(RecordSnapshot).filter(
-            RecordSnapshot.status == status_filter, RecordSnapshot.is_removed == False  # noqa: E712
-        ).limit(30).all()
-        if not rows:
-            await update.message.reply_text("Nothing to show.")
-            return
-        lines = [f"⏳ {status_filter} ({len(rows)} shown, max 30)", ""]
-        for r in rows:
-            lines.append(f"Slip {r.slip_no} — {r.stage} ({r.slip_type})")
-        await update.message.reply_text("\n".join(lines))
-    finally:
-        session.close()
-
-
-async def cmd_lastupload(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not _is_authorized(update):
-        await update.message.reply_text("❌ Unauthorized.")
-        return
-    session = get_session()
-    try:
-        u = session.query(Upload).order_by(Upload.id.desc()).first()
-        if not u:
-            await update.message.reply_text("No uploads yet.")
-            return
-        await update.message.reply_text(
-            f"📁 Last Upload\n\nFile: {u.filename}\nAt: {u.upload_timestamp}\n"
-            f"Rows: {u.row_count}\nStatus: {u.processing_status} ({u.validation_status})"
-        )
-    finally:
-        session.close()
-
-
-async def cmd_summary(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Re-shows the full upload summary (same format as what gets auto-sent
-    after every upload) for the most recent upload, on demand."""
-    if not _is_authorized(update):
-        await update.message.reply_text("❌ Unauthorized.")
-        return
-    session = get_session()
-    try:
-        u = session.query(Upload).order_by(Upload.id.desc()).first()
-        if not u:
-            await update.message.reply_text("No uploads yet — send me an Excel file first.")
-            return
-
-        from app.message_renderer import render_upload_summary
-        summary = {
-            "filename": u.filename,
-            "row_count": u.row_count,
-            "new_records": u.new_records or 0,
-            "updated_records": u.updated_records or 0,
-            "completed_records": u.completed_records or 0,
-            "new_alerts": u.new_alerts or 0,
-            "duplicates_suppressed": u.duplicates_suppressed or 0,
-            "anomaly_count": u.anomaly_count or 0,
-            "validation_status": u.validation_status,
-        }
-        text = render_upload_summary(summary)
-        text += f"\n\n(from upload at {u.upload_timestamp}, processing: {u.processing_status})"
-        await update.message.reply_text(text)
-    finally:
-        session.close()
-
-
-async def cmd_rules(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not _is_authorized(update):
-        await update.message.reply_text("❌ Unauthorized.")
-        return
-    from app.config import load_rules_config
-    cfg = load_rules_config()
-    lines = ["📋 Active Rules", ""]
-    for r in cfg["rules"]:
-        if r.get("enabled", True):
-            lines.append(f"{r['id']}: {r['name']}")
-    await update.message.reply_text("\n".join(lines))
-
-
-async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not _is_authorized(update):
-        await update.message.reply_text("❌ Unauthorized upload.")
-        return
-
-    doc = update.message.document
-    if not doc or not validate_extension(doc.file_name):
-        await update.message.reply_text("❌ Please send a .xlsx or .xlsm file.")
-        return
-
-    if _processing_lock.locked():
-        await update.message.reply_text("⏳ Another upload is currently being processed. Please wait and retry shortly.")
-        return
-
-    async with _processing_lock:
-        os.makedirs(settings.TEMP_DIR, exist_ok=True)
-        local_path = os.path.join(settings.TEMP_DIR, f"{doc.file_unique_id}_{doc.file_name}")
-
-        try:
-            tg_file = await doc.get_file()
-            await tg_file.download_to_drive(local_path)
-
-            await update.message.reply_text(f"📥 Received {doc.file_name}, processing...")
-
-            session = get_session()
-
-            # Collect messages instead of firing them off immediately -- sending
-            # hundreds of alerts as concurrent fire-and-forget tasks (the old
-            # behavior) floods Telegram's connection pool and times most of
-            # them out. We queue here and send sequentially afterward instead.
-            pending_messages = []
-
-            def send_fn(chat_id, text):
-                pending_messages.append((chat_id, text))
-
-            try:
-                process_upload(
-                    session=session,
-                    file_path=local_path,
-                    filename=doc.file_name,
-                    telegram_user_id=str(update.effective_user.id),
-                    telegram_chat_id=str(update.effective_chat.id),
-                    send_fn=send_fn,
-                )
-            except ProcessingError as pe:
-                await update.message.reply_text(pe.user_message)
-                logger.exception("Processing failed")
-            finally:
-                session.close()
-
-            # Send the summary / stopped-items report first so the user gets
-            # confirmation quickly, then trickle the rest (individual rule
-            # alerts) at a safe pace -- Telegram throttles ~1 msg/sec per chat,
-            # and a large backfill upload can generate hundreds of alerts.
-            priority = [m for m in pending_messages if "UPLOAD SUMMARY" in m[1] or "STOPPED ITEMS" in m[1]]
-            rest = [m for m in pending_messages if m not in priority]
-
-            for chat_id, text in priority + rest:
-                for attempt in range(2):  # one retry on transient timeout
-                    try:
-                        await context.bot.send_message(chat_id=chat_id, text=text)
-                        break
-                    except Exception:
-                        if attempt == 0:
-                            await asyncio.sleep(1)
-                        else:
-                            logger.exception(f"Failed to deliver message to {chat_id} after retry")
-                await asyncio.sleep(0.35)  # stay under Telegram's per-chat rate limit
-
-        finally:
-            if os.path.exists(local_path):
-                os.remove(local_path)  # temp file cleanup -- DB is the persistent record
-
-
-def build_app() -> Application:
-    if not settings.TELEGRAM_BOT_TOKEN:
-        raise RuntimeError("TELEGRAM_BOT_TOKEN is not set")
-
-    # Default connection pool is small (historically 1 in python-telegram-bot),
-    # shared between the long-polling getUpdates() loop and every outgoing
-    # send_message() call. Under a busy upload (hundreds of trickled alerts,
-    # see app/telegram_bot.py's handle_document) this causes
-    # "PoolTimeout: All connections in the connection pool are occupied" --
-    # explicitly widen it and give some breathing room on timeouts.
-    request = HTTPXRequest(
-        connection_pool_size=16,
-        connect_timeout=20,
-        read_timeout=20,
-        write_timeout=20,
-        pool_timeout=20,
-    )
-
-    application = (
-        Application.builder()
-        .token(settings.TELEGRAM_BOT_TOKEN)
-        .request(request)
-        .build()
-    )
-
-    application.add_handler(CommandHandler("start", cmd_start))
-    application.add_handler(CommandHandler("health", cmd_health))
-    application.add_handler(CommandHandler("status", cmd_status))
-    application.add_handler(CommandHandler("pending", cmd_pending))
-    application.add_handler(CommandHandler("urgent", cmd_urgent))
-    application.add_handler(CommandHandler("overdue", cmd_overdue))
-    application.add_handler(CommandHandler("lastupload", cmd_lastupload))
-    application.add_handler(CommandHandler("summary", cmd_summary))
-    application.add_handler(CommandHandler("rules", cmd_rules))
-    application.add_handler(MessageHandler(filters.Document.ALL, handle_document))
-
-    return application
+        main()
+    except Exception:
+        # Ensure a crash is ALWAYS visible in the logs with a full traceback --
+        # previously the process could exit silently with no error output at
+        # all, making it impossible to diagnose from Render's logs.
+        logger.exception("Fatal error -- process is exiting")
+        sys.exit(1)
