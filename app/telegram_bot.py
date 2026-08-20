@@ -7,6 +7,7 @@ from telegram import Update
 from telegram.ext import (
     Application, CommandHandler, MessageHandler, ContextTypes, filters
 )
+from telegram.request import HTTPXRequest
 
 from app.config import settings
 from app.db import get_session
@@ -161,6 +162,38 @@ async def cmd_lastupload(update: Update, context: ContextTypes.DEFAULT_TYPE):
         session.close()
 
 
+async def cmd_summary(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Re-shows the full upload summary (same format as what gets auto-sent
+    after every upload) for the most recent upload, on demand."""
+    if not _is_authorized(update):
+        await update.message.reply_text("❌ Unauthorized.")
+        return
+    session = get_session()
+    try:
+        u = session.query(Upload).order_by(Upload.id.desc()).first()
+        if not u:
+            await update.message.reply_text("No uploads yet — send me an Excel file first.")
+            return
+
+        from app.message_renderer import render_upload_summary
+        summary = {
+            "filename": u.filename,
+            "row_count": u.row_count,
+            "new_records": u.new_records or 0,
+            "updated_records": u.updated_records or 0,
+            "completed_records": u.completed_records or 0,
+            "new_alerts": u.new_alerts or 0,
+            "duplicates_suppressed": u.duplicates_suppressed or 0,
+            "anomaly_count": u.anomaly_count or 0,
+            "validation_status": u.validation_status,
+        }
+        text = render_upload_summary(summary)
+        text += f"\n\n(from upload at {u.upload_timestamp}, processing: {u.processing_status})"
+        await update.message.reply_text(text)
+    finally:
+        session.close()
+
+
 async def cmd_rules(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not _is_authorized(update):
         await update.message.reply_text("❌ Unauthorized.")
@@ -200,8 +233,14 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
             session = get_session()
 
+            # Collect messages instead of firing them off immediately -- sending
+            # hundreds of alerts as concurrent fire-and-forget tasks (the old
+            # behavior) floods Telegram's connection pool and times most of
+            # them out. We queue here and send sequentially afterward instead.
+            pending_messages = []
+
             def send_fn(chat_id, text):
-                asyncio.create_task(context.bot.send_message(chat_id=chat_id, text=text))
+                pending_messages.append((chat_id, text))
 
             try:
                 process_upload(
@@ -218,6 +257,25 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
             finally:
                 session.close()
 
+            # Send the summary / stopped-items report first so the user gets
+            # confirmation quickly, then trickle the rest (individual rule
+            # alerts) at a safe pace -- Telegram throttles ~1 msg/sec per chat,
+            # and a large backfill upload can generate hundreds of alerts.
+            priority = [m for m in pending_messages if "UPLOAD SUMMARY" in m[1] or "STOPPED ITEMS" in m[1]]
+            rest = [m for m in pending_messages if m not in priority]
+
+            for chat_id, text in priority + rest:
+                for attempt in range(2):  # one retry on transient timeout
+                    try:
+                        await context.bot.send_message(chat_id=chat_id, text=text)
+                        break
+                    except Exception:
+                        if attempt == 0:
+                            await asyncio.sleep(1)
+                        else:
+                            logger.exception(f"Failed to deliver message to {chat_id} after retry")
+                await asyncio.sleep(0.35)  # stay under Telegram's per-chat rate limit
+
         finally:
             if os.path.exists(local_path):
                 os.remove(local_path)  # temp file cleanup -- DB is the persistent record
@@ -227,7 +285,26 @@ def build_app() -> Application:
     if not settings.TELEGRAM_BOT_TOKEN:
         raise RuntimeError("TELEGRAM_BOT_TOKEN is not set")
 
-    application = Application.builder().token(settings.TELEGRAM_BOT_TOKEN).build()
+    # Default connection pool is small (historically 1 in python-telegram-bot),
+    # shared between the long-polling getUpdates() loop and every outgoing
+    # send_message() call. Under a busy upload (hundreds of trickled alerts,
+    # see app/telegram_bot.py's handle_document) this causes
+    # "PoolTimeout: All connections in the connection pool are occupied" --
+    # explicitly widen it and give some breathing room on timeouts.
+    request = HTTPXRequest(
+        connection_pool_size=16,
+        connect_timeout=20,
+        read_timeout=20,
+        write_timeout=20,
+        pool_timeout=20,
+    )
+
+    application = (
+        Application.builder()
+        .token(settings.TELEGRAM_BOT_TOKEN)
+        .request(request)
+        .build()
+    )
 
     application.add_handler(CommandHandler("start", cmd_start))
     application.add_handler(CommandHandler("health", cmd_health))
@@ -236,6 +313,7 @@ def build_app() -> Application:
     application.add_handler(CommandHandler("urgent", cmd_urgent))
     application.add_handler(CommandHandler("overdue", cmd_overdue))
     application.add_handler(CommandHandler("lastupload", cmd_lastupload))
+    application.add_handler(CommandHandler("summary", cmd_summary))
     application.add_handler(CommandHandler("rules", cmd_rules))
     application.add_handler(MessageHandler(filters.Document.ALL, handle_document))
 
