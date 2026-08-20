@@ -1,6 +1,7 @@
 import time
 import hashlib
-from datetime import datetime
+import pandas as pd
+from datetime import datetime, timedelta
 
 from app.validator import validate_workbook, file_hash
 from app.excel_parser import normalize, record_id
@@ -74,14 +75,41 @@ def process_upload(session, file_path: str, filename: str, telegram_user_id: str
         for rid, row, stage, status in diff.completed:
             resolve_alerts_for_completed(session, rid)
 
+        # Confirmed with user 20-Aug-2026: individual Telegram pings only fire
+        # for records whose ALTERATION SLIP DATE is within the last N days
+        # (RECENT_ALERT_WINDOW_DAYS, default 7). Older records -- e.g. a big
+        # historical backfill upload -- still get evaluated and still show up
+        # in the Stopped Items / Pending Report, they just don't flood the chat
+        # with hundreds of individual messages.
+        now = datetime.utcnow()
+        recent_cutoff = now - timedelta(days=settings.RECENT_ALERT_WINDOW_DAYS)
+
         # evaluate deadline rules across all currently-pending rows
         pending_groups = diff.new + [(r[0], r[1], r[2], r[3]) for r in diff.updated] + diff.unchanged
         stopped_items = []  # Condition 7: (slip_no, stage) for anything whose deadline has actually passed
         for rid, row, stage, status in pending_groups:
             if status == "COMPLETED":
                 continue
-            evaluations = evaluate_deadline_rules(row, rules_cfg)
+
+            slip_date = row.get("slip_date")
+            if isinstance(slip_date, str):
+                try:
+                    slip_date = pd.to_datetime(slip_date)
+                except Exception:
+                    slip_date = None
+            is_recent = pd.notna(slip_date) and slip_date >= recent_cutoff
+
+            evaluations = evaluate_deadline_rules(row, rules_cfg, now=now)
             for ev in evaluations:
+                # "time nikal gaya" = remaining_minutes is a real number and <= 0.
+                # Tracked for the report regardless of recency -- old AND new
+                # overdue items both belong in the Pending Report.
+                if ev.get("remaining_minutes") is not None and ev["remaining_minutes"] <= 0:
+                    stopped_items.append((row.get("slip_no"), ev["stage"]))
+
+                if not is_recent:
+                    continue  # older than the window -- report only, no individual ping
+
                 msg = render_deadline_alert(row, ev)
                 if should_alert(session, rid, ev["rule_id"], ev["alert_stage"], msg):
                     if not settings.DRY_RUN:
@@ -89,11 +117,6 @@ def process_upload(session, file_path: str, filename: str, telegram_user_id: str
                     new_alerts += 1
                 else:
                     duplicates_suppressed += 1
-
-                # "time nikal gaya" = remaining_minutes is a real number and <= 0.
-                # Excludes RULE_012 (MISSING_DEADLINE_DATA), which has no deadline at all.
-                if ev.get("remaining_minutes") is not None and ev["remaining_minutes"] <= 0:
-                    stopped_items.append((row.get("slip_no"), ev["stage"]))
 
         # de-dupe (slip_no, stage) pairs -- a row can be re-evaluated across new/updated/unchanged groups
         stopped_items = sorted(set(stopped_items), key=lambda x: (str(x[1]), str(x[0])))
