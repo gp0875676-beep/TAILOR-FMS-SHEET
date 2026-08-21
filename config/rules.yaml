@@ -55,6 +55,7 @@ rules:
     enabled: true
     deadline_field: tailor_deadline
     complete_field: tailor_complete
+    upstream_field: received_by_tailor
     tiers:
       - {minutes: 20, label: "20m_pre_deadline", severity: URGENT}
       - {minutes: 10, label: "10m_pre_deadline", severity: MOST_URGENT}
@@ -109,6 +110,7 @@ rules:
     enabled: true
     deadline_field: finishing_deadline
     complete_field: finishing_complete
+    upstream_field: tailor_complete
     tiers:
       - {minutes: 15, label: "15m_pre_deadline", severity: URGENT}
     overdue_tiers:
@@ -122,6 +124,7 @@ rules:
     enabled: true
     deadline_field: qc_deadline
     complete_field: packing_complete
+    upstream_field: finishing_complete
     required_columns: [qc_deadline, packing_complete, slip_type]
     note: "QC DEADLINE doubles as the effective packing-stage deadline (confirmed via PACKING HRS regression)."
 
@@ -138,6 +141,7 @@ rules:
     enabled: true
     deadline_field: delivery_deadline
     complete_field: delivered_customer
+    upstream_field: packing_complete
     tiers:
       - {minutes: 240, label: "4h_pre_delivery", severity: URGENT}
     overdue_severity: MOST_URGENT
