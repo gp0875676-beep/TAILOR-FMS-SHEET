@@ -74,9 +74,21 @@ def _evaluate_stage_deadline_tiered(row: pd.Series, rule: dict, now: datetime) -
     Supports both pre-deadline tiers (`tiers`) and post-deadline / overdue
     tiers (`overdue_tiers`, e.g. "alert again 15 min after deadline passes").
     If a rule has no `overdue_tiers`, it falls back to a single flat
-    `overdue_severity` the moment the deadline passes (RULE_002's behavior)."""
+    `overdue_severity` the moment the deadline passes (RULE_002's behavior).
+
+    `upstream_field`, if set, must be non-null before this rule evaluates at
+    all -- e.g. don't alert on the FINISHING deadline for a piece that hasn't
+    even finished TAILOR yet. Confirmed real-world need: in the actual
+    workbook, downstream deadline dates (FINISHING DATE, QC DEADLINE, etc.)
+    are often pre-scheduled at slip-creation time, long before the piece
+    reaches that stage -- without this guard, 243 rows in the real workbook
+    triggered a premature FINISHING alert while still stuck at TAILOR."""
     deadline_field = rule["deadline_field"]
     complete_field = rule["complete_field"]
+
+    upstream_field = rule.get("upstream_field")
+    if upstream_field and pd.isna(row.get(upstream_field)):
+        return None  # piece hasn't reached this stage yet -- too early to alert
 
     complete = row.get(complete_field)
     if pd.notna(complete):
@@ -194,6 +206,10 @@ def evaluate_deadline_rules(row: pd.Series, rules_cfg: dict, now: datetime = Non
 
         deadline_field = rule["deadline_field"]
         complete_field = rule["complete_field"]
+
+        upstream_field = rule.get("upstream_field")
+        if upstream_field and pd.isna(row.get(upstream_field)):
+            continue  # piece hasn't reached this stage yet -- too early to alert
 
         deadline = row.get(deadline_field)
         complete = row.get(complete_field)
