@@ -13,7 +13,7 @@ from app.message_renderer import (
     render_deadline_alert, render_anomaly, render_upload_summary, render_stopped_items_report
 )
 from app.models import Upload, Anomaly
-from app.config import settings, load_rules_config
+from app.config import settings, load_rules_config, business_now
 
 
 class ProcessingError(Exception):
@@ -54,7 +54,7 @@ def process_upload(session, file_path: str, filename: str, telegram_user_id: str
         telegram_user_id=telegram_user_id,
         telegram_chat_id=telegram_chat_id,
         filename=filename,
-        upload_timestamp=datetime.utcnow(),
+        upload_timestamp=business_now(),
         file_hash=fhash,
         row_count=validation.row_count,
         column_count=validation.column_count,
@@ -81,7 +81,7 @@ def process_upload(session, file_path: str, filename: str, telegram_user_id: str
         # historical backfill upload -- still get evaluated and still show up
         # in the Stopped Items / Pending Report, they just don't flood the chat
         # with hundreds of individual messages.
-        now = datetime.utcnow()
+        now = business_now()
         recent_cutoff = now - timedelta(days=settings.RECENT_ALERT_WINDOW_DAYS)
 
         # evaluate deadline rules across all currently-pending rows
@@ -134,7 +134,7 @@ def process_upload(session, file_path: str, filename: str, telegram_user_id: str
                 continue
             session.add(Anomaly(
                 record_id=a["record_id"], dq_rule_id=a["dq_rule_id"],
-                description=a["description"], detected_at=datetime.utcnow(),
+                description=a["description"], detected_at=business_now(),
                 upload_id=upload.id, status="OPEN",
             ))
         session.commit()
