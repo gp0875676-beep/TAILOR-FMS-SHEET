@@ -62,6 +62,8 @@ def evaluate_pending_records(session) -> list[str]:
 
             evaluations = evaluate_deadline_rules(row, rules_cfg, now=now)
             for ev in evaluations:
+                if ev["rule_id"] in settings.SUPPRESSED_ALERT_RULES:
+                    continue  # e.g. Delivery rules -- report only, no individual ping
                 msg = render_deadline_alert(row, ev)
                 if should_alert(session, snap.record_id, ev["rule_id"], ev["alert_stage"], msg):
                     messages.append(msg)
