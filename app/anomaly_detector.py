@@ -7,14 +7,25 @@ def detect_anomalies(df: pd.DataFrame) -> list[dict]:
     anomalies = []
 
     # DQ_001: completion out of order (finishing before tailor, packing before finishing, etc.)
+    #
+    # Real-world bug fix: a real uploaded workbook can have a date column
+    # that pandas reads as dtype=object (mixed text/blank/date cells) instead
+    # of datetime64, which makes pandas refuse the "<" comparison below with
+    # "Invalid comparison between dtype=datetime64[us] and ndarray". Coercing
+    # both sides through pd.to_datetime(errors='coerce') first makes this
+    # robust to messy real data -- unparseable cells just become NaT and get
+    # dropped by dropna(), which is the correct "skip this bad row, don't
+    # crash the whole upload" behavior anyway (see Section 15 of the spec).
     order_checks = [
         ("finishing_complete", "tailor_complete", "Finishing completed before Tailor completed"),
         ("packing_complete", "finishing_complete", "Packing completed before Finishing completed"),
         ("delivered_customer", "packing_complete", "Delivered before Packing completed"),  # also DQ_005
     ]
     for later_field, earlier_field, desc in order_checks:
-        sub = df.dropna(subset=[later_field, earlier_field])
-        bad = sub[sub[later_field] < sub[earlier_field]]
+        later_dt = pd.to_datetime(df[later_field], errors="coerce")
+        earlier_dt = pd.to_datetime(df[earlier_field], errors="coerce")
+        mask = later_dt.notna() & earlier_dt.notna() & (later_dt < earlier_dt)
+        bad = df[mask]
         for _, row in bad.iterrows():
             anomalies.append({
                 "record_id": f"RFID:{row.get('rfid')}",
