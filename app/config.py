@@ -1,7 +1,23 @@
 import os
 import yaml
+from datetime import datetime, timedelta
 
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+# The business (and every timestamp typed into the FMS Excel sheet) operates
+# in India Standard Time (IST, UTC+5:30). The server runs in UTC. Every place
+# that computes "what time is it right now" for deadline math MUST use this
+# helper instead of datetime.utcnow() directly, or every SLA calculation
+# ends up off by 5.5 hours -- confirmed as a real production bug 22-Aug-2026:
+# alerts were silently not firing because the system thought deadlines were
+# hours in the future when they had already passed in real IST time.
+IST_OFFSET = timedelta(hours=5, minutes=30)
+
+
+def business_now() -> datetime:
+    """Naive 'now', in IST terms, matching how dates are entered in the
+    workbook. Use this for ALL deadline/SLA comparisons against Excel data."""
+    return datetime.utcnow() + IST_OFFSET
 
 
 def _env_list(name: str) -> list[str]:
