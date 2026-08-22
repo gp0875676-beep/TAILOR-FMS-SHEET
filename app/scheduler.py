@@ -20,7 +20,7 @@ from app.models import RecordSnapshot
 from app.rule_engine import evaluate_deadline_rules
 from app.message_renderer import render_deadline_alert
 from app.alert_engine import should_alert
-from app.config import settings, load_rules_config
+from app.config import settings, load_rules_config, business_now
 
 logger = logging.getLogger("fms_scheduler")
 
@@ -38,7 +38,7 @@ def evaluate_pending_records(session) -> list[str]:
     """Returns a list of new (not-yet-sent) alert message strings. Caller is
     responsible for actually sending them and for closing the session."""
     rules_cfg = load_rules_config()
-    now = datetime.utcnow()
+    now = business_now()
     recent_cutoff = now - timedelta(days=settings.RECENT_ALERT_WINDOW_DAYS)
 
     pending = session.query(RecordSnapshot).filter(
