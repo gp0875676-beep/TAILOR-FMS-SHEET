@@ -14,6 +14,7 @@ from app.db import get_session
 from app.validator import validate_extension
 from app.pipeline import process_upload, ProcessingError
 from app.models import Upload, RecordSnapshot, Anomaly
+from app.scheduler import evaluate_pending_records
 
 logger = logging.getLogger("fms_bot")
 
@@ -281,6 +282,41 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 os.remove(local_path)  # temp file cleanup -- DB is the persistent record
 
 
+async def periodic_check_job(context: ContextTypes.DEFAULT_TYPE):
+    """Runs every TIME_BASED_CHECK_INTERVAL_MINUTES (default 5) via PTB's
+    JobQueue, on the SAME asyncio event loop as the bot -- no extra thread
+    needed. Re-checks every pending record's deadlines against the current
+    time and sends any newly-crossed-threshold alerts, independent of
+    whether a new Excel was uploaded."""
+    if not settings.ENABLE_TIME_BASED_MONITORING:
+        return
+    if not settings.AUTHORIZED_CHAT_IDS:
+        return
+
+    session = get_session()
+    try:
+        messages = evaluate_pending_records(session)
+    finally:
+        session.close()
+
+    if not messages:
+        return
+
+    logger.info(f"Periodic check: sending {len(messages)} alert(s)")
+    for chat_id in settings.AUTHORIZED_CHAT_IDS:
+        for msg in messages:
+            for attempt in range(2):
+                try:
+                    await context.bot.send_message(chat_id=chat_id, text=msg)
+                    break
+                except Exception:
+                    if attempt == 0:
+                        await asyncio.sleep(1)
+                    else:
+                        logger.exception(f"Failed to deliver periodic alert to {chat_id}")
+            await asyncio.sleep(0.35)  # stay under Telegram's per-chat rate limit
+
+
 def build_app() -> Application:
     if not settings.TELEGRAM_BOT_TOKEN:
         raise RuntimeError("TELEGRAM_BOT_TOKEN is not set")
@@ -316,5 +352,15 @@ def build_app() -> Application:
     application.add_handler(CommandHandler("summary", cmd_summary))
     application.add_handler(CommandHandler("rules", cmd_rules))
     application.add_handler(MessageHandler(filters.Document.ALL, handle_document))
+
+    if settings.ENABLE_TIME_BASED_MONITORING and application.job_queue:
+        interval_seconds = settings.TIME_BASED_CHECK_INTERVAL_MINUTES * 60
+        application.job_queue.run_repeating(
+            periodic_check_job, interval=interval_seconds, first=30
+        )
+        logger.info(
+            f"Periodic time-based monitoring enabled: every "
+            f"{settings.TIME_BASED_CHECK_INTERVAL_MINUTES} minute(s)"
+        )
 
     return application
