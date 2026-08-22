@@ -22,12 +22,14 @@ class Settings:
 
     ACTIVE_SHEET: str = os.environ.get("ACTIVE_SHEET", "Sheet1")
 
-    # optional between-upload time-based re-evaluation (section 35)
+    # Confirmed with user 20-Aug-2026: automatic background re-checking, so
+    # tight-window rules (RULE_001's 5-min pre-deadline warning) don't get
+    # missed just because no new Excel was uploaded in that window.
     ENABLE_TIME_BASED_MONITORING: bool = os.environ.get(
-        "ENABLE_TIME_BASED_MONITORING", "false"
+        "ENABLE_TIME_BASED_MONITORING", "true"
     ).lower() == "true"
     TIME_BASED_CHECK_INTERVAL_MINUTES: int = int(
-        os.environ.get("TIME_BASED_CHECK_INTERVAL_MINUTES", "15")
+        os.environ.get("TIME_BASED_CHECK_INTERVAL_MINUTES", "5")
     )
 
     LOG_LEVEL: str = os.environ.get("LOG_LEVEL", "INFO")
