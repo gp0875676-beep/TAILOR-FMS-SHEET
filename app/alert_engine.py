@@ -1,6 +1,6 @@
 import hashlib
-from datetime import datetime
 from app.models import AlertHistory
+from app.config import business_now
 
 
 def _fingerprint(record_id: str, rule_id: str, alert_stage: str) -> str:
@@ -11,7 +11,7 @@ def should_alert(session, record_id: str, rule_id: str, alert_stage: str, messag
     """Returns True (and records the alert) only if this exact fingerprint
     hasn't already been sent. A new alert_stage (e.g. escalating from '1h' to
     'OVERDUE') is a different fingerprint and WILL alert again."""
-    now = datetime.utcnow()
+    now = business_now()
     msg_hash = hashlib.sha256(message.encode()).hexdigest()
 
     existing = (
