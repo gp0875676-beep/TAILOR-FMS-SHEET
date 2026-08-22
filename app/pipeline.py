@@ -110,6 +110,9 @@ def process_upload(session, file_path: str, filename: str, telegram_user_id: str
                 if not is_recent:
                     continue  # older than the window -- report only, no individual ping
 
+                if ev["rule_id"] in settings.SUPPRESSED_ALERT_RULES:
+                    continue  # e.g. Delivery rules -- report only, no individual ping
+
                 msg = render_deadline_alert(row, ev)
                 if should_alert(session, rid, ev["rule_id"], ev["alert_stage"], msg):
                     if not settings.DRY_RUN:
