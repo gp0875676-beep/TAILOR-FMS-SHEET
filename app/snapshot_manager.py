@@ -4,6 +4,7 @@ from datetime import datetime
 from dataclasses import dataclass, field
 from app.models import RecordSnapshot
 from app.excel_parser import record_id, determine_stage
+from app.config import business_now
 
 # fields whose change counts as a "meaningful update" (ignore noisy/derived HRS columns)
 MEANINGFUL_FIELDS = [
@@ -34,7 +35,7 @@ def _row_to_dict(row: pd.Series) -> dict:
 
 def diff_snapshot(session, df: pd.DataFrame, upload_id: int) -> DiffResult:
     result = DiffResult()
-    now = datetime.utcnow()
+    now = business_now()
     seen_ids = set()
 
     for _, row in df.iterrows():
