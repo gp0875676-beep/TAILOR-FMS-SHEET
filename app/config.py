@@ -43,6 +43,14 @@ class Settings:
     # Pending Report -- they just don't generate a per-record ping.
     RECENT_ALERT_WINDOW_DAYS: int = int(os.environ.get("RECENT_ALERT_WINDOW_DAYS", "7"))
 
+    # Confirmed with user 22-Aug-2026: Delivery-related rules (RULE_009 --
+    # 4h-before-delivery reminder + overdue, RULE_011 -- 24h/4h packing lead
+    # time reminders) should NOT push individual Telegram alerts anymore.
+    # They're still evaluated and still show up in /pending and the Stopped
+    # Items Report -- just no proactive ping. TAILOR (RULE_001, RULE_002) and
+    # FINISHING (RULE_007) are untouched and keep alerting as before.
+    SUPPRESSED_ALERT_RULES: list[str] = _env_list("SUPPRESSED_ALERT_RULES") or ["RULE_009", "RULE_011"]
+
 
 def load_rules_config() -> dict:
     path = os.path.join(BASE_DIR, "config", "rules.yaml")
