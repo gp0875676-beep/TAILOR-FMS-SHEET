@@ -8,6 +8,7 @@ is responsible for deduplication against alert_history.
 """
 import pandas as pd
 from datetime import datetime, timedelta
+from app.config import business_now
 
 
 def _tier_for(slip_type: str, thresholds_cfg: dict) -> list:
@@ -172,7 +173,7 @@ def _evaluate_missing_deadline_but_completed(row: pd.Series, rule: dict) -> dict
 
 
 def evaluate_deadline_rules(row: pd.Series, rules_cfg: dict, now: datetime = None) -> list:
-    now = now or datetime.utcnow()
+    now = now or business_now()
     thresholds_cfg = rules_cfg["reminder_thresholds"]
     overdue_severity = rules_cfg.get("overdue_severity", "OVERDUE")
     evaluations = []
