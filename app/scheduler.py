@@ -34,9 +34,14 @@ def _row_from_snapshot(snap: RecordSnapshot) -> pd.Series:
     return pd.Series(data)
 
 
-def evaluate_pending_records(session) -> list[str]:
-    """Returns a list of new (not-yet-sent) alert message strings. Caller is
-    responsible for actually sending them and for closing the session."""
+def evaluate_pending_records(session) -> list[tuple[str, tuple]]:
+    """Returns a list of (message, fingerprint) tuples for new (not-yet-sent)
+    alerts. fingerprint = (record_id, rule_id, alert_stage) -- the caller
+    uses it to roll back alert_engine's dedup record if the actual Telegram
+    delivery ultimately fails (see alert_engine.mark_alert_failed), so a
+    failed send gets retried on the next cycle instead of being silently
+    treated as "already sent forever." Caller is responsible for actually
+    sending them and for closing the session."""
     rules_cfg = load_rules_config()
     now = business_now()
     recent_cutoff = now - timedelta(days=settings.RECENT_ALERT_WINDOW_DAYS)
@@ -45,7 +50,7 @@ def evaluate_pending_records(session) -> list[str]:
         RecordSnapshot.status == "PENDING", RecordSnapshot.is_removed == False  # noqa: E712
     ).all()
 
-    messages = []
+    results = []
     for snap in pending:
         try:
             row = _row_from_snapshot(snap)
@@ -66,10 +71,10 @@ def evaluate_pending_records(session) -> list[str]:
                     continue  # e.g. Delivery rules -- report only, no individual ping
                 msg = render_deadline_alert(row, ev)
                 if should_alert(session, snap.record_id, ev["rule_id"], ev["alert_stage"], msg):
-                    messages.append(msg)
+                    results.append((msg, (snap.record_id, ev["rule_id"], ev["alert_stage"])))
         except Exception:
             # one bad/malformed snapshot shouldn't take down the whole scan
             logger.exception(f"Failed evaluating snapshot {snap.record_id} during periodic check")
             session.rollback()
 
-    return messages
+    return results
