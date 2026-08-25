@@ -15,6 +15,7 @@ from app.validator import validate_extension
 from app.pipeline import process_upload, ProcessingError
 from app.models import Upload, RecordSnapshot, Anomaly
 from app.scheduler import evaluate_pending_records
+from app.alert_engine import mark_alert_failed
 
 logger = logging.getLogger("fms_bot")
 
@@ -238,10 +239,12 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
             # hundreds of alerts as concurrent fire-and-forget tasks (the old
             # behavior) floods Telegram's connection pool and times most of
             # them out. We queue here and send sequentially afterward instead.
+            # fingerprint (record_id, rule_id, alert_stage) travels alongside
+            # each alert message so a failed send can be rolled back below.
             pending_messages = []
 
-            def send_fn(chat_id, text):
-                pending_messages.append((chat_id, text))
+            def send_fn(chat_id, text, fingerprint=None):
+                pending_messages.append((chat_id, text, fingerprint))
 
             try:
                 process_upload(
@@ -265,16 +268,31 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
             priority = [m for m in pending_messages if "UPLOAD SUMMARY" in m[1] or "STOPPED ITEMS" in m[1]]
             rest = [m for m in pending_messages if m not in priority]
 
-            for chat_id, text in priority + rest:
+            for chat_id, text, fingerprint in priority + rest:
+                delivered = False
                 for attempt in range(2):  # one retry on transient timeout
                     try:
                         await context.bot.send_message(chat_id=chat_id, text=text)
+                        delivered = True
                         break
                     except Exception:
                         if attempt == 0:
                             await asyncio.sleep(1)
                         else:
                             logger.exception(f"Failed to deliver message to {chat_id} after retry")
+
+                if not delivered and fingerprint is not None:
+                    # Confirmed real bug 23-Aug-2026: without this rollback, a
+                    # failed send was permanently marked "already alerted" in
+                    # the DB and would never be retried on a future upload or
+                    # periodic check -- the user would just silently never get it.
+                    rollback_session = get_session()
+                    try:
+                        mark_alert_failed(rollback_session, *fingerprint)
+                        logger.info(f"Rolled back failed alert {fingerprint} for retry")
+                    finally:
+                        rollback_session.close()
+
                 await asyncio.sleep(0.35)  # stay under Telegram's per-chat rate limit
 
         finally:
@@ -295,25 +313,36 @@ async def periodic_check_job(context: ContextTypes.DEFAULT_TYPE):
 
     session = get_session()
     try:
-        messages = evaluate_pending_records(session)
+        results = evaluate_pending_records(session)
     finally:
         session.close()
 
-    if not messages:
+    if not results:
         return
 
-    logger.info(f"Periodic check: sending {len(messages)} alert(s)")
+    logger.info(f"Periodic check: sending {len(results)} alert(s)")
     for chat_id in settings.AUTHORIZED_CHAT_IDS:
-        for msg in messages:
+        for msg, fingerprint in results:
+            delivered = False
             for attempt in range(2):
                 try:
                     await context.bot.send_message(chat_id=chat_id, text=msg)
+                    delivered = True
                     break
                 except Exception:
                     if attempt == 0:
                         await asyncio.sleep(1)
                     else:
                         logger.exception(f"Failed to deliver periodic alert to {chat_id}")
+
+            if not delivered:
+                rollback_session = get_session()
+                try:
+                    mark_alert_failed(rollback_session, *fingerprint)
+                    logger.info(f"Rolled back failed periodic alert {fingerprint} for retry")
+                finally:
+                    rollback_session.close()
+
             await asyncio.sleep(0.35)  # stay under Telegram's per-chat rate limit
 
 
