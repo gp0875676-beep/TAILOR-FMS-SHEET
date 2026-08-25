@@ -25,7 +25,11 @@ class ProcessingError(Exception):
 def process_upload(session, file_path: str, filename: str, telegram_user_id: str,
                     telegram_chat_id: str, send_fn) -> dict:
     """
-    send_fn(chat_id, text) -> sends a Telegram message (or no-ops in DRY_RUN).
+    send_fn(chat_id, text, fingerprint=None) -> queues/sends a Telegram message
+    (or no-ops in DRY_RUN). `fingerprint`, when set, is (record_id, rule_id,
+    alert_stage) -- the caller uses it to roll back alert_engine's dedup
+    record if the actual Telegram delivery ultimately fails, so a failed send
+    gets retried instead of being silently treated as "already sent forever."
     Returns the summary dict that was sent, for /status caching etc.
     """
     started = time.time()
@@ -116,7 +120,7 @@ def process_upload(session, file_path: str, filename: str, telegram_user_id: str
                 msg = render_deadline_alert(row, ev)
                 if should_alert(session, rid, ev["rule_id"], ev["alert_stage"], msg):
                     if not settings.DRY_RUN:
-                        send_fn(telegram_chat_id, msg)
+                        send_fn(telegram_chat_id, msg, (rid, ev["rule_id"], ev["alert_stage"]))
                     new_alerts += 1
                 else:
                     duplicates_suppressed += 1
