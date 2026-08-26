@@ -64,14 +64,29 @@ def validate_workbook(path: str) -> tuple[ValidationResult, pd.DataFrame | None]
 
     total = len(df)
 
-    # Row-level validity: must have a non-null identity (slip_no + rfid) and a parseable slip_date
+    # Row-level validity: must have a non-null identity (slip_no + rfid) and a
+    # parseable slip_date. Previously this only checked for a non-null cell --
+    # a text value like "ABC123" in the date column would pass validation
+    # silently, then get skipped later by rule_engine.py's own defensive
+    # parsing, invisibly excluding the row from alerting without ever being
+    # flagged as an invalid row in the validation summary. Now actually try
+    # to parse it.
     invalid_idx = []
     for idx, row in df.iterrows():
         bad = False
         if pd.isna(row.get("alteration slip NO")) or pd.isna(row.get("RFID")):
             bad = True
-        if pd.isna(row.get("ALTERATION SLIP DATE")):
+
+        slip_date = row.get("ALTERATION SLIP DATE")
+        if pd.isna(slip_date):
             bad = True
+        elif not isinstance(slip_date, (pd.Timestamp,)):
+            # not already a proper datetime (e.g. a stray text value) -- confirm it's parseable
+            try:
+                pd.to_datetime(slip_date)
+            except Exception:
+                bad = True
+
         if bad:
             invalid_idx.append(idx)
 
