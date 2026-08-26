@@ -39,7 +39,7 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     await update.message.reply_text(
         "🤖 FMS Bot ready.\nSend me the FMS Excel file (.xlsx) to process an upload.\n"
-        "Commands: /status /pending /urgent /overdue /summary /lastupload /health /rules"
+        "Commands: /status /pending /urgent /overdue /summary /lastupload /health /rules /anomalies"
     )
 
 
@@ -201,12 +201,54 @@ async def cmd_rules(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("❌ Unauthorized.")
         return
     from app.config import load_rules_config
+
+    # Only these categories are actually evaluated by rule_engine.py -- rules
+    # in other categories (PROCESS_PENDING, ESCALATION) don't currently
+    # generate alerts on their own, they're informational/reserved for future
+    # use. Labeling this explicitly so /rules doesn't imply they're live.
+    ALERTING_CATEGORIES = {"AGENCY_TO_TAILOR_SLA", "STAGE_DEADLINE_TIERED", "MISSING_DEADLINE_ALERT", "DEADLINE"}
+
     cfg = load_rules_config()
-    lines = ["📋 Active Rules", ""]
+    active_lines, info_lines = [], []
     for r in cfg["rules"]:
-        if r.get("enabled", True):
-            lines.append(f"{r['id']}: {r['name']}")
+        if not r.get("enabled", True):
+            continue
+        line = f"{r['id']}: {r['name']}"
+        if r.get("category") in ALERTING_CATEGORIES:
+            active_lines.append(line)
+        else:
+            info_lines.append(line)
+
+    lines = ["📋 Active Rules (generate alerts)", ""] + active_lines
+    if info_lines:
+        lines += ["", "ℹ️ Informational only (no alert yet)", ""] + info_lines
     await update.message.reply_text("\n".join(lines))
+
+
+async def cmd_anomalies(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Confirmed real gap (23-Aug-2026 audit): detect_anomalies() finds data
+    quality issues (DQ_001-DQ_006) every upload and stores them, but the
+    Telegram side never surfaced the details -- only a count in the upload
+    summary. This gives access to the actual list on demand, without
+    flooding the chat (which sending each one individually as it's detected
+    would do -- can be 2000+ on a big backfill)."""
+    if not _is_authorized(update):
+        await update.message.reply_text("❌ Unauthorized.")
+        return
+    from app.models import Anomaly
+    session = get_session()
+    try:
+        rows = session.query(Anomaly).filter_by(status="OPEN").order_by(Anomaly.id.desc()).limit(30).all()
+        if not rows:
+            await update.message.reply_text("No open data-quality issues.")
+            return
+        total_open = session.query(Anomaly).filter_by(status="OPEN").count()
+        lines = [f"⚠️ DATA QUALITY ISSUES ({len(rows)} shown of {total_open} open)", ""]
+        for r in rows:
+            lines.append(f"[{r.dq_rule_id}] {r.description}")
+        await update.message.reply_text("\n".join(lines))
+    finally:
+        session.close()
 
 
 async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -320,6 +362,10 @@ async def periodic_check_job(context: ContextTypes.DEFAULT_TYPE):
     if not results:
         return
 
+    if settings.DRY_RUN:
+        logger.info(f"Periodic check (DRY_RUN): would send {len(results)} alert(s), skipping actual send")
+        return
+
     logger.info(f"Periodic check: sending {len(results)} alert(s)")
     for chat_id in settings.AUTHORIZED_CHAT_IDS:
         for msg, fingerprint in results:
@@ -380,6 +426,7 @@ def build_app() -> Application:
     application.add_handler(CommandHandler("lastupload", cmd_lastupload))
     application.add_handler(CommandHandler("summary", cmd_summary))
     application.add_handler(CommandHandler("rules", cmd_rules))
+    application.add_handler(CommandHandler("anomalies", cmd_anomalies))
     application.add_handler(MessageHandler(filters.Document.ALL, handle_document))
 
     if settings.ENABLE_TIME_BASED_MONITORING and application.job_queue:
