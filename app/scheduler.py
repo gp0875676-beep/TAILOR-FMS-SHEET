@@ -70,7 +70,8 @@ def evaluate_pending_records(session) -> list[tuple[str, tuple]]:
                 if ev["rule_id"] in settings.SUPPRESSED_ALERT_RULES:
                     continue  # e.g. Delivery rules -- report only, no individual ping
                 msg = render_deadline_alert(row, ev)
-                if should_alert(session, snap.record_id, ev["rule_id"], ev["alert_stage"], msg):
+                if should_alert(session, snap.record_id, ev["rule_id"], ev["alert_stage"], msg,
+                                 severity=ev["severity"], persist=not settings.DRY_RUN):
                     results.append((msg, (snap.record_id, ev["rule_id"], ev["alert_stage"])))
         except Exception:
             # one bad/malformed snapshot shouldn't take down the whole scan
