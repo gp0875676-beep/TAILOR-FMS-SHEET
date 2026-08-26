@@ -118,7 +118,8 @@ def process_upload(session, file_path: str, filename: str, telegram_user_id: str
                     continue  # e.g. Delivery rules -- report only, no individual ping
 
                 msg = render_deadline_alert(row, ev)
-                if should_alert(session, rid, ev["rule_id"], ev["alert_stage"], msg):
+                if should_alert(session, rid, ev["rule_id"], ev["alert_stage"], msg,
+                                 severity=ev["severity"], persist=not settings.DRY_RUN):
                     if not settings.DRY_RUN:
                         send_fn(telegram_chat_id, msg, (rid, ev["rule_id"], ev["alert_stage"]))
                     new_alerts += 1
