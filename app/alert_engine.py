@@ -7,10 +7,34 @@ def _fingerprint(record_id: str, rule_id: str, alert_stage: str) -> str:
     return hashlib.sha256(f"{record_id}|{rule_id}|{alert_stage}".encode()).hexdigest()
 
 
-def should_alert(session, record_id: str, rule_id: str, alert_stage: str, message: str) -> bool:
-    """Returns True (and records the alert) only if this exact fingerprint
-    hasn't already been sent. A new alert_stage (e.g. escalating from '1h' to
-    'OVERDUE') is a different fingerprint and WILL alert again."""
+def has_already_alerted(session, record_id: str, rule_id: str, alert_stage: str) -> bool:
+    """Read-only check -- does NOT write to the DB. Used for DRY_RUN so a
+    preview run never mutates alert_history (see should_alert's docstring for
+    why that matters)."""
+    existing = (
+        session.query(AlertHistory)
+        .filter_by(record_id=record_id, rule_id=rule_id, alert_stage=alert_stage)
+        .one_or_none()
+    )
+    return bool(existing and existing.status == "ACTIVE")
+
+
+def should_alert(session, record_id: str, rule_id: str, alert_stage: str, message: str,
+                  severity: str = None, persist: bool = True) -> bool:
+    """Returns True only if this exact fingerprint hasn't already been sent. A
+    new alert_stage (e.g. escalating from '1h' to 'OVERDUE') is a different
+    fingerprint and WILL alert again.
+
+    persist=False (confirmed real bug 23-Aug-2026 -- DRY_RUN was marking
+    alerts as sent in the DB even though it never actually sends anything,
+    permanently suppressing the REAL alert once DRY_RUN was turned back off)
+    performs a read-only check and writes nothing -- use this in DRY_RUN mode.
+    Only call with persist=True when you are actually about to send the
+    message, since this marks it ACTIVE immediately (see mark_alert_failed
+    for the rollback path if the send itself then fails)."""
+    if not persist:
+        return not has_already_alerted(session, record_id, rule_id, alert_stage)
+
     now = business_now()
     msg_hash = hashlib.sha256(message.encode()).hexdigest()
 
@@ -31,6 +55,8 @@ def should_alert(session, record_id: str, rule_id: str, alert_stage: str, messag
         existing.last_triggered_at = now
         existing.alert_count = (existing.alert_count or 0) + 1
         existing.message_hash = msg_hash
+        if severity:
+            existing.severity = severity
         session.commit()
         return True
 
@@ -38,7 +64,7 @@ def should_alert(session, record_id: str, rule_id: str, alert_stage: str, messag
         record_id=record_id,
         rule_id=rule_id,
         alert_stage=alert_stage,
-        severity=alert_stage,
+        severity=severity or alert_stage,  # fallback only if caller didn't pass one
         first_triggered_at=now,
         last_triggered_at=now,
         last_seen_at=now,
