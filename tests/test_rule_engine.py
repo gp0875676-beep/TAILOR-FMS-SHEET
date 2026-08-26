@@ -167,7 +167,13 @@ def test_rule001_no_alert_when_far_from_deadline():
 # -------------------- RULE_002: Tailor stage completion deadline --------------------
 
 def _rule002_row(tailor_deadline=None, tailor_complete=None, slip_type="Normal"):
-    return _base_row(tailor_deadline=tailor_deadline, tailor_complete=tailor_complete, slip_type=slip_type)
+    # received_by_tailor defaults to "already received" so the upstream-stage
+    # guard doesn't block these deadline-math tests; explicit-None tests for
+    # the guard itself are separate (see test_rule002_no_alert_before_received).
+    return _base_row(
+        tailor_deadline=tailor_deadline, tailor_complete=tailor_complete, slip_type=slip_type,
+        received_by_tailor=datetime.utcnow() - timedelta(hours=1),
+    )
 
 
 def test_rule002_20min_warning():
@@ -226,10 +232,26 @@ def test_rule002_no_alert_when_more_than_20min_left():
     assert evals == []
 
 
+def test_rule002_no_alert_before_received_by_tailor():
+    """Upstream guard: if the piece hasn't even been received by the tailor
+    yet, RULE_002 (tailor completion deadline) must not fire -- that would be
+    RULE_001's territory (slip -> tailor receipt SLA)."""
+    cfg = load_rules_config()
+    now = datetime.utcnow()
+    row = _base_row(tailor_deadline=now + timedelta(minutes=5), received_by_tailor=None)
+    evals = [e for e in evaluate_deadline_rules(row, cfg, now=now) if e["rule_id"] == "RULE_002"]
+    assert evals == []
+
+
 # -------------------- RULE_007: Finishing stage completion deadline (3 alerts) --------------------
 
 def _rule007_row(finishing_deadline=None, finishing_complete=None, slip_type="Normal"):
-    return _base_row(finishing_deadline=finishing_deadline, finishing_complete=finishing_complete, slip_type=slip_type)
+    # tailor_complete defaults to "already done" so the upstream-stage guard
+    # doesn't block these deadline-math tests (see test_rule007 upstream guard test).
+    return _base_row(
+        finishing_deadline=finishing_deadline, finishing_complete=finishing_complete, slip_type=slip_type,
+        tailor_complete=datetime.utcnow() - timedelta(hours=1),
+    )
 
 
 def test_rule007_alert1_15min_before():
@@ -288,6 +310,19 @@ def test_rule007_same_thresholds_for_normal_and_urgent():
     assert n_ev[0]["alert_stage"] == u_ev[0]["alert_stage"] == "15m_pre_deadline"
 
 
+def test_rule007_no_alert_before_tailor_complete():
+    """The real bug: user reported pieces still stuck at TAILOR/AGENCY showing
+    up as FINISHING alerts, because FINISHING DATE is often pre-scheduled in
+    the workbook long before TAILOR actually finishes. Confirmed against the
+    real workbook: 243 rows had finishing_deadline set with tailor_complete
+    still empty. This guard must suppress RULE_007 for all of them."""
+    cfg = load_rules_config()
+    now = datetime.utcnow()
+    row = _base_row(finishing_deadline=now + timedelta(minutes=5), tailor_complete=None)
+    evals = [e for e in evaluate_deadline_rules(row, cfg, now=now) if e["rule_id"] == "RULE_007"]
+    assert evals == []
+
+
 # -------------------- RULE_011: Packing completion vs Delivery Date --------------------
 
 def _rule011_row(delivery_deadline=None, packing_complete=None):
@@ -344,7 +379,12 @@ def test_rule011_no_alert_when_packing_already_complete():
 # -------------------- RULE_009: Delivery Date vs Delivered to Customer --------------------
 
 def _rule009_row(delivery_deadline=None, delivered_customer=None):
-    return _base_row(delivery_deadline=delivery_deadline, delivered_customer=delivered_customer)
+    # packing_complete defaults to "already done" so the upstream-stage guard
+    # doesn't block these deadline-math tests.
+    return _base_row(
+        delivery_deadline=delivery_deadline, delivered_customer=delivered_customer,
+        packing_complete=datetime.utcnow() - timedelta(hours=1),
+    )
 
 
 def test_rule009_4h_reminder():
@@ -380,6 +420,25 @@ def test_rule009_no_alert_when_already_delivered():
     now = datetime.utcnow()
     row = _rule009_row(delivery_deadline=now + timedelta(hours=2), delivered_customer=now - timedelta(minutes=5))
     evals = [e for e in evaluate_deadline_rules(row, cfg, now=now) if e["rule_id"] == "RULE_009"]
+    assert evals == []
+
+
+def test_rule009_no_alert_before_packing_complete():
+    cfg = load_rules_config()
+    now = datetime.utcnow()
+    row = _base_row(delivery_deadline=now + timedelta(hours=2), packing_complete=None)
+    evals = [e for e in evaluate_deadline_rules(row, cfg, now=now) if e["rule_id"] == "RULE_009"]
+    assert evals == []
+
+
+def test_rule008_no_alert_before_finishing_complete():
+    """RULE_008 (QC/Packing deadline) uses the older generic DEADLINE code
+    path, not STAGE_DEADLINE_TIERED -- confirms the upstream guard was added
+    there too, not just in the newer rule types."""
+    cfg = load_rules_config()
+    now = datetime.utcnow()
+    row = _base_row(qc_deadline=now + timedelta(hours=2), finishing_complete=None)
+    evals = [e for e in evaluate_deadline_rules(row, cfg, now=now) if e["rule_id"] == "RULE_008"]
     assert evals == []
 
 
