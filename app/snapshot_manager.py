@@ -33,22 +33,37 @@ def _row_to_dict(row: pd.Series) -> dict:
     return d
 
 
+def _completeness_score(row: pd.Series) -> int:
+    """How many completion-stage fields are filled in -- used to pick the
+    most-advanced row when the same RFID appears more than once in one
+    upload (a real DQ_003 data-quality issue, but we still need to pick ONE
+    row to track, and the most complete one is more likely to be the correct
+    current state than an earlier/incomplete duplicate entry)."""
+    fields = ["received_by_tailor", "tailor_complete", "finishing_complete",
+              "packing_complete", "delivered_customer"]
+    return sum(1 for f in fields if pd.notna(row.get(f)))
+
+
 def diff_snapshot(session, df: pd.DataFrame, upload_id: int) -> DiffResult:
     result = DiffResult()
     now = business_now()
-    seen_ids = set()
 
+    # First pass: when the same record_id (RFID) appears more than once in
+    # this upload, pick the most-complete row to represent it, rather than
+    # blindly keeping whichever happened to come first. Ties go to the LAST
+    # occurrence in the sheet (more likely to be a correction/update).
+    best_row_by_id: dict[str, pd.Series] = {}
     for _, row in df.iterrows():
         rid = record_id(row)
+        current_best = best_row_by_id.get(rid)
+        if current_best is None or _completeness_score(row) >= _completeness_score(current_best):
+            best_row_by_id[rid] = row
+
+    seen_ids = set()
+
+    for rid, row in best_row_by_id.items():
         stage, status = determine_stage(row)
         new_data = _row_to_dict(row)
-
-        if rid in seen_ids:
-            # Duplicate record_id within the same upload (e.g. same RFID logged twice --
-            # a DQ_003 data-quality issue, not a modeling bug). Keep the first occurrence's
-            # snapshot and skip re-processing this row as a distinct record to avoid a
-            # unique-constraint crash; anomaly_detector.py separately reports DQ_003/DQ_004.
-            continue
         seen_ids.add(rid)
 
         existing = session.query(RecordSnapshot).filter_by(record_id=rid).one_or_none()
