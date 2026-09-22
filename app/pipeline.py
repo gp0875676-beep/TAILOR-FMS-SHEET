@@ -88,6 +88,13 @@ def process_upload(session, file_path: str, filename: str, telegram_user_id: str
         now = business_now()
         recent_cutoff = now - timedelta(days=settings.RECENT_ALERT_WINDOW_DAYS)
 
+        # Confirmed with user 24-Aug-2026: DELIVERY-stage pieces should NOT
+        # appear in the Stopped Items Report -- once packing is done and it's
+        # just awaiting delivery execution, the user doesn't want it cluttering
+        # the "stuck in production" list. Only TAILOR/FINISHING/PACKING (and
+        # any other pre-delivery stage) belong here.
+        STOPPED_REPORT_EXCLUDED_STAGES = {"DELIVERY"}
+
         # evaluate deadline rules across all currently-pending rows
         pending_groups = diff.new + [(r[0], r[1], r[2], r[3]) for r in diff.updated] + diff.unchanged
         stopped_items = []  # Condition 7: (slip_no, stage) for anything whose deadline has actually passed
@@ -107,8 +114,10 @@ def process_upload(session, file_path: str, filename: str, telegram_user_id: str
             for ev in evaluations:
                 # "time nikal gaya" = remaining_minutes is a real number and <= 0.
                 # Tracked for the report regardless of recency -- old AND new
-                # overdue items both belong in the Pending Report.
-                if ev.get("remaining_minutes") is not None and ev["remaining_minutes"] <= 0:
+                # overdue items both belong in the Pending Report -- except
+                # DELIVERY-stage items, excluded per user's request above.
+                if (ev.get("remaining_minutes") is not None and ev["remaining_minutes"] <= 0
+                        and ev["stage"] not in STOPPED_REPORT_EXCLUDED_STAGES):
                     stopped_items.append((row.get("slip_no"), ev["stage"]))
 
                 if not is_recent:
