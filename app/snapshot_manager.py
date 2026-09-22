@@ -75,6 +75,7 @@ def diff_snapshot(session, df: pd.DataFrame, upload_id: int) -> DiffResult:
                 rfid=str(row.get("rfid")),
                 item_name=row.get("item_name"),
                 slip_type=row.get("slip_type"),
+                order_ocs=(str(row.get("order_ocs")) if pd.notna(row.get("order_ocs")) else None),
                 stage=stage,
                 status=status,
                 last_upload_id=upload_id,
@@ -96,6 +97,7 @@ def diff_snapshot(session, df: pd.DataFrame, upload_id: int) -> DiffResult:
         existing.is_removed = False
         existing.stage = stage
         existing.status = status
+        existing.order_ocs = str(row.get("order_ocs")) if pd.notna(row.get("order_ocs")) else None
         existing.raw_json = json.dumps(new_data, default=str)
 
         if status == "COMPLETED" and not was_completed:
