@@ -40,6 +40,7 @@ class RecordSnapshot(Base):
     rfid = Column(String)
     item_name = Column(String)
     slip_type = Column(String)
+    order_ocs = Column(String, index=True)  # ORDER OCS -- lets /pending prioritize order-tagged pieces
     stage = Column(String)          # current pending stage: AGENCY/TAILOR/FINISHING/PACKING/DELIVERY/COMPLETED
     status = Column(String)         # PENDING/COMPLETED
     last_upload_id = Column(Integer)
