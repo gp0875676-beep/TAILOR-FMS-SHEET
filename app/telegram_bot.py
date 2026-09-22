@@ -91,17 +91,24 @@ async def cmd_urgent(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     session = get_session()
     try:
-        rows = session.query(RecordSnapshot).filter(
+        base_query = session.query(RecordSnapshot).filter(
             RecordSnapshot.status == "PENDING",
             RecordSnapshot.slip_type == "Urgent",
             RecordSnapshot.is_removed == False,  # noqa: E712
-        ).limit(30).all()
+        )
+        order_rows = base_query.filter(RecordSnapshot.order_ocs.isnot(None)).all()
+        remaining_slots = max(0, 60 - len(order_rows))
+        other_rows = base_query.filter(RecordSnapshot.order_ocs.is_(None)).limit(remaining_slots).all()
+        rows = order_rows + other_rows
+
         if not rows:
             await update.message.reply_text("No urgent pending items.")
             return
-        lines = [f"🚨 URGENT PENDING ({len(rows)} shown, max 30)", ""]
+        total_count = base_query.count()
+        lines = [f"🚨 URGENT PENDING ({len(rows)} shown of {total_count})", ""]
         for r in rows:
-            lines.append(f"Slip {r.slip_no} — {r.stage}")
+            tag = f" [Order {r.order_ocs}]" if r.order_ocs else ""
+            lines.append(f"Slip {r.slip_no} — {r.stage}{tag}")
         await update.message.reply_text("\n".join(lines))
     finally:
         session.close()
@@ -132,17 +139,32 @@ async def _stage_list(update: Update, status_filter: str):
         return
     session = get_session()
     try:
-        rows = session.query(RecordSnapshot).filter(
+        base_query = session.query(RecordSnapshot).filter(
             RecordSnapshot.status == status_filter, RecordSnapshot.is_removed == False  # noqa: E712
-        ).limit(30).all()
+        )
+
+        # Confirmed real bug (24-Aug-2026): plain .limit(30) with no ordering
+        # meant ORDER OCS-tagged pieces (a small subset of total pending)
+        # regularly got crowded out of an arbitrary top-30 selection whenever
+        # the total pending count was large. Guarantee every order-tagged
+        # piece shows up, then fill remaining slots with the rest.
+        order_rows = base_query.filter(RecordSnapshot.order_ocs.isnot(None)).all()
+        remaining_slots = max(0, 60 - len(order_rows))
+        other_rows = base_query.filter(RecordSnapshot.order_ocs.is_(None)).limit(remaining_slots).all()
+        rows = order_rows + other_rows
+
         if not rows:
             await update.message.reply_text("Nothing to show.")
             return
-        lines = [f"⏳ {status_filter} ({len(rows)} shown, max 30)", ""]
+
+        total_count = base_query.count()
+        lines = [f"⏳ {status_filter} ({len(rows)} shown of {total_count})", ""]
         for r in rows:
-            lines.append(f"Slip {r.slip_no} — {r.stage} ({r.slip_type})")
+            tag = f" [Order {r.order_ocs}]" if r.order_ocs else ""
+            lines.append(f"Slip {r.slip_no} — {r.stage} ({r.slip_type}){tag}")
         await update.message.reply_text("\n".join(lines))
     finally:
+        session.close()
         session.close()
 
 
