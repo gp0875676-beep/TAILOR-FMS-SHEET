@@ -144,3 +144,37 @@ def render_stopped_items_report(stopped_items: list, max_chars: int = 3500) -> l
 
 def render_status_change(row, from_stage: str, to_stage: str) -> str:
     return f"✅ Status Change\n\nSlip {row.get('slip_no')}\n{from_stage} → {to_stage}"
+
+
+def _chunk_lines(header: str, lines: list, max_chars: int = 3500) -> list[str]:
+    """Shared chunker: packs 'lines' under 'header' into as few Telegram
+    messages as possible without exceeding Telegram's 4096-char cap (we use
+    a 3500 safety margin). Used by every no-cap list command (/pending,
+    /urgent, /tailor, /packing, /order, /overdue) so a large real-workbook
+    result never gets silently truncated or split badly."""
+    if not lines:
+        return [header.rstrip()] if header.strip() else []
+
+    chunks = []
+    current = header
+    for line in lines:
+        if len(current) + len(line) + 1 > max_chars:
+            chunks.append(current.rstrip())
+            current = ""
+        current += line + "\n"
+    if current.strip():
+        chunks.append(current.rstrip())
+
+    if len(chunks) > 1:
+        chunks = [f"{c}\n\n(part {i+1}/{len(chunks)})" for i, c in enumerate(chunks)]
+
+    return chunks
+
+
+def render_full_list(title: str, lines: list, total_count: int, max_chars: int = 3500) -> list[str]:
+    """Generic no-cap chunked renderer used by /pending, /urgent, /tailor,
+    /packing, /order, /overdue -- confirmed with user 24-Aug-2026: no more
+    silent 30/60-item caps, show EVERY matching piece, chunked to respect
+    Telegram's message-length limit instead."""
+    header = f"{title}\n\n({total_count} item(s))\n\n"
+    return _chunk_lines(header, lines, max_chars=max_chars)
