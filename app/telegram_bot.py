@@ -220,7 +220,16 @@ async def cmd_overdue(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def _stage_list(update: Update, status_filter: str):
     """REVISED 25-Aug-2026 (Condition 5): order-tagged pieces are excluded
-    entirely from /pending -- they now live only in /order."""
+    entirely from /pending -- they now live only in /order.
+    REVISED 29-Sep-2026 (user request): /pending should stop at PACKING
+    COMPLETE -- a piece that has packing_complete set (stage == DELIVERY,
+    still waiting only on DELIVERED TO CUSTOMER) should no longer count as
+    "pending" here. Confirmed with user: packing complete is the actual
+    end of the process for /pending's purposes; DELIVERY/delivered_customer
+    should not keep a piece showing up. This filter is scoped to /pending
+    only -- it does not touch the underlying stage/status fields used by
+    RecordSnapshot elsewhere (RULE_007's upstream guard, DQ checks, /order,
+    etc.), so nothing else changes behavior."""
     if not _is_authorized(update):
         await update.message.reply_text("❌ Unauthorized.")
         return
@@ -230,6 +239,7 @@ async def _stage_list(update: Update, status_filter: str):
             RecordSnapshot.status == status_filter,
             RecordSnapshot.is_removed == False,  # noqa: E712
             RecordSnapshot.order_ocs.is_(None),
+            RecordSnapshot.stage != "DELIVERY",
         ).all()
 
         if not rows:
