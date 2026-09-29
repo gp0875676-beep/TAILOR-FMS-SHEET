@@ -9,13 +9,14 @@ from telegram.ext import (
 )
 from telegram.request import HTTPXRequest
 
-from app.config import settings
+from app.config import settings, business_now
 from app.db import get_session
 from app.validator import validate_extension
 from app.pipeline import process_upload, ProcessingError
 from app.models import Upload, RecordSnapshot, Anomaly
 from app.scheduler import evaluate_pending_records
 from app.alert_engine import mark_alert_failed
+from app.message_renderer import render_full_list
 
 logger = logging.getLogger("fms_bot")
 
@@ -39,7 +40,8 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     await update.message.reply_text(
         "🤖 FMS Bot ready.\nSend me the FMS Excel file (.xlsx) to process an upload.\n"
-        "Commands: /status /pending /urgent /overdue /summary /lastupload /health /rules /anomalies"
+        "Commands: /status /pending /urgent /overdue /tailor /packing /order "
+        "/summary /lastupload /health /rules /anomalies"
     )
 
 
@@ -85,31 +87,114 @@ async def cmd_pending(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await _stage_list(update, status_filter="PENDING")
 
 
-async def cmd_urgent(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def cmd_tailor(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Confirmed with user 24-Aug-2026 (Condition 2 revision): replaces
+    RULE_002's 3 deleted individual alerts. Shows every piece currently
+    PENDING at the TAILOR stage (received by tailor, not yet TAILOR COMPLETE)
+    whose ALTERATION SLIP DATE is within the last RECENT_ALERT_WINDOW_DAYS
+    (default 7) -- no item-count cap.
+    REVISED 25-Aug-2026 (Condition 5): order-tagged pieces are excluded
+    entirely -- they now live only in /order."""
+    if not _is_authorized(update):
+        await update.message.reply_text("❌ Unauthorized.")
+        return
+    import json
+    import pandas as pd
+    from datetime import timedelta
+
+    session = get_session()
+    try:
+        rows = session.query(RecordSnapshot).filter(
+            RecordSnapshot.stage == "TAILOR",
+            RecordSnapshot.status == "PENDING",
+            RecordSnapshot.is_removed == False,  # noqa: E712
+            RecordSnapshot.order_ocs.is_(None),
+        ).all()
+
+        cutoff = business_now() - timedelta(days=settings.RECENT_ALERT_WINDOW_DAYS)
+        recent_rows = []
+        for r in rows:
+            try:
+                data = json.loads(r.raw_json) if r.raw_json else {}
+                slip_date = pd.to_datetime(data.get("slip_date"), errors="coerce")
+                if pd.notna(slip_date) and slip_date >= cutoff:
+                    recent_rows.append(r)
+            except Exception:
+                continue
+
+        if not recent_rows:
+            await update.message.reply_text("No pieces currently pending at Tailor in the last 7 days.")
+            return
+
+        recent_rows.sort(key=lambda r: (r.slip_no or ""))
+        lines = [f"Slip {r.slip_no} — {r.item_name}" for r in recent_rows]
+
+        chunks = render_full_list("✂️ TAILOR — PENDING (last 7 days)", lines, total_count=len(recent_rows))
+        for chunk in chunks:
+            await update.message.reply_text(chunk)
+    finally:
+        session.close()
+
+
+async def cmd_packing(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Confirmed with user 25-Aug-2026 (Condition 4 revision): completely
+    replaces RULE_011 (deleted, all lead-time alerts removed). Shows every
+    piece currently PENDING at the PACKING stage (finishing complete, packing
+    not yet complete) -- NO date filter, ALL such pieces regardless of age,
+    no item-count cap.
+    REVISED 25-Aug-2026 (Condition 5): order-tagged pieces are excluded
+    entirely -- they now live only in /order."""
     if not _is_authorized(update):
         await update.message.reply_text("❌ Unauthorized.")
         return
     session = get_session()
     try:
-        base_query = session.query(RecordSnapshot).filter(
+        rows = session.query(RecordSnapshot).filter(
+            RecordSnapshot.stage == "PACKING",
+            RecordSnapshot.status == "PENDING",
+            RecordSnapshot.is_removed == False,  # noqa: E712
+            RecordSnapshot.order_ocs.is_(None),
+        ).all()
+
+        if not rows:
+            await update.message.reply_text("No pieces currently pending at Packing.")
+            return
+
+        rows.sort(key=lambda r: (r.slip_no or ""))
+        lines = [f"Slip {r.slip_no} — {r.item_name}" for r in rows]
+
+        chunks = render_full_list("📦 PACKING — PENDING", lines, total_count=len(rows))
+        for chunk in chunks:
+            await update.message.reply_text(chunk)
+    finally:
+        session.close()
+
+
+async def cmd_urgent(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """REVISED 25-Aug-2026 (Condition 5): order-tagged pieces are excluded
+    entirely -- they now live only in /order."""
+    if not _is_authorized(update):
+        await update.message.reply_text("❌ Unauthorized.")
+        return
+    session = get_session()
+    try:
+        rows = session.query(RecordSnapshot).filter(
             RecordSnapshot.status == "PENDING",
             RecordSnapshot.slip_type == "Urgent",
             RecordSnapshot.is_removed == False,  # noqa: E712
-        )
-        order_rows = base_query.filter(RecordSnapshot.order_ocs.isnot(None)).all()
-        remaining_slots = max(0, 60 - len(order_rows))
-        other_rows = base_query.filter(RecordSnapshot.order_ocs.is_(None)).limit(remaining_slots).all()
-        rows = order_rows + other_rows
+            RecordSnapshot.order_ocs.is_(None),
+        ).all()
 
         if not rows:
             await update.message.reply_text("No urgent pending items.")
             return
-        total_count = base_query.count()
-        lines = [f"🚨 URGENT PENDING ({len(rows)} shown of {total_count})", ""]
-        for r in rows:
-            tag = f" [Order {r.order_ocs}]" if r.order_ocs else ""
-            lines.append(f"Slip {r.slip_no} — {r.stage}{tag}")
-        await update.message.reply_text("\n".join(lines))
+
+        rows.sort(key=lambda r: (r.slip_no or ""))
+        lines = [f"Slip {r.slip_no} — {r.stage}" for r in rows]
+
+        chunks = render_full_list("🚨 URGENT PENDING", lines, total_count=len(rows))
+        for chunk in chunks:
+            await update.message.reply_text(chunk)
     finally:
         session.close()
 
@@ -121,50 +206,85 @@ async def cmd_overdue(update: Update, context: ContextTypes.DEFAULT_TYPE):
     from app.models import AlertHistory
     session = get_session()
     try:
-        rows = session.query(AlertHistory).filter_by(alert_stage="OVERDUE", status="ACTIVE").limit(30).all()
+        rows = session.query(AlertHistory).filter_by(alert_stage="OVERDUE", status="ACTIVE").all()
         if not rows:
             await update.message.reply_text("No active overdue alerts.")
             return
-        lines = [f"🔴 OVERDUE ({len(rows)} shown, max 30)", ""]
-        for r in rows:
-            lines.append(f"{r.record_id} — rule {r.rule_id}")
-        await update.message.reply_text("\n".join(lines))
+        lines = [f"{r.record_id} — rule {r.rule_id}" for r in rows]
+        chunks = render_full_list("🔴 OVERDUE", lines, total_count=len(rows))
+        for chunk in chunks:
+            await update.message.reply_text(chunk)
     finally:
         session.close()
 
 
 async def _stage_list(update: Update, status_filter: str):
+    """REVISED 25-Aug-2026 (Condition 5): order-tagged pieces are excluded
+    entirely from /pending -- they now live only in /order."""
     if not _is_authorized(update):
         await update.message.reply_text("❌ Unauthorized.")
         return
     session = get_session()
     try:
-        base_query = session.query(RecordSnapshot).filter(
-            RecordSnapshot.status == status_filter, RecordSnapshot.is_removed == False  # noqa: E712
-        )
-
-        # Confirmed real bug (24-Aug-2026): plain .limit(30) with no ordering
-        # meant ORDER OCS-tagged pieces (a small subset of total pending)
-        # regularly got crowded out of an arbitrary top-30 selection whenever
-        # the total pending count was large. Guarantee every order-tagged
-        # piece shows up, then fill remaining slots with the rest.
-        order_rows = base_query.filter(RecordSnapshot.order_ocs.isnot(None)).all()
-        remaining_slots = max(0, 60 - len(order_rows))
-        other_rows = base_query.filter(RecordSnapshot.order_ocs.is_(None)).limit(remaining_slots).all()
-        rows = order_rows + other_rows
+        rows = session.query(RecordSnapshot).filter(
+            RecordSnapshot.status == status_filter,
+            RecordSnapshot.is_removed == False,  # noqa: E712
+            RecordSnapshot.order_ocs.is_(None),
+        ).all()
 
         if not rows:
             await update.message.reply_text("Nothing to show.")
             return
 
-        total_count = base_query.count()
-        lines = [f"⏳ {status_filter} ({len(rows)} shown of {total_count})", ""]
-        for r in rows:
-            tag = f" [Order {r.order_ocs}]" if r.order_ocs else ""
-            lines.append(f"Slip {r.slip_no} — {r.stage} ({r.slip_type}){tag}")
-        await update.message.reply_text("\n".join(lines))
+        # Confirmed with user 24-Aug-2026: no more silent 30/60-item caps --
+        # show EVERY matching piece.
+        rows.sort(key=lambda r: (r.slip_no or ""))
+        lines = [f"Slip {r.slip_no} — {r.stage} ({r.slip_type})" for r in rows]
+
+        chunks = render_full_list(f"⏳ {status_filter}", lines, total_count=len(rows))
+        for chunk in chunks:
+            await update.message.reply_text(chunk)
     finally:
         session.close()
+
+
+async def cmd_order(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """NEW 25-Aug-2026 (Condition 5): completely replaces RULE_009 (deleted,
+    no more delivery-reminder/overdue push alerts). Shows every PENDING
+    order-tagged piece (ORDER OCS is set) across ANY stage -- no date filter,
+    no item-count cap. Fully completed/delivered order pieces are excluded
+    entirely (status == PENDING filters those out). TAILOR-stage order
+    pieces are shown minimally (just Order + Slip, per user spec -- these
+    are still mid-stitching and don't need a stage label); every other
+    stage is shown with its stage label. These pieces are excluded from
+    /pending, /urgent, /tailor and /packing -- /order is their only home."""
+    if not _is_authorized(update):
+        await update.message.reply_text("❌ Unauthorized.")
+        return
+    session = get_session()
+    try:
+        rows = session.query(RecordSnapshot).filter(
+            RecordSnapshot.order_ocs.isnot(None),
+            RecordSnapshot.status == "PENDING",
+            RecordSnapshot.is_removed == False,  # noqa: E712
+        ).all()
+
+        if not rows:
+            await update.message.reply_text("No pending order pieces.")
+            return
+
+        rows.sort(key=lambda r: (r.stage or "", r.slip_no or ""))
+        lines = []
+        for r in rows:
+            if r.stage == "TAILOR":
+                lines.append(f"Order {r.order_ocs} — Slip {r.slip_no}")
+            else:
+                lines.append(f"Order {r.order_ocs} — Slip {r.slip_no} — {r.stage}")
+
+        chunks = render_full_list("📋 ORDER PIECES — PENDING", lines, total_count=len(rows))
+        for chunk in chunks:
+            await update.message.reply_text(chunk)
+    finally:
         session.close()
 
 
@@ -444,6 +564,9 @@ def build_app() -> Application:
     application.add_handler(CommandHandler("status", cmd_status))
     application.add_handler(CommandHandler("pending", cmd_pending))
     application.add_handler(CommandHandler("urgent", cmd_urgent))
+    application.add_handler(CommandHandler("tailor", cmd_tailor))
+    application.add_handler(CommandHandler("packing", cmd_packing))
+    application.add_handler(CommandHandler("order", cmd_order))
     application.add_handler(CommandHandler("overdue", cmd_overdue))
     application.add_handler(CommandHandler("lastupload", cmd_lastupload))
     application.add_handler(CommandHandler("summary", cmd_summary))
