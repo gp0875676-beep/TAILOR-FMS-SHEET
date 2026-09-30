@@ -259,7 +259,12 @@ async def _stage_list(update: Update, status_filter: str):
     RecordSnapshot elsewhere (RULE_007's upstream guard, DQ checks, /order,
     etc.), so nothing else changes behavior.
     REVISED 30-Sep-2026 (Condition 6): SAREE-category pieces (see
-    _is_saree_item) are excluded entirely -- they now live only in /saree."""
+    _is_saree_item) are excluded entirely -- they now live only in /saree.
+    REVISED 30-Sep-2026 (user request): grouped by stage instead of one
+    flat slip-number-sorted list -- confirmed with user: AGENCY pieces all
+    together, then TAILOR, then FINISHING, then PACKING (process order),
+    slip number still the sort within each group. Same info as before,
+    just organized."""
     if not _is_authorized(update):
         await update.message.reply_text("❌ Unauthorized.")
         return
@@ -278,9 +283,25 @@ async def _stage_list(update: Update, status_filter: str):
             return
 
         # Confirmed with user 24-Aug-2026: no more silent 30/60-item caps --
-        # show EVERY matching piece.
-        rows.sort(key=lambda r: (r.slip_no or ""))
-        lines = [f"Slip {r.slip_no} — {r.stage} ({r.slip_type})" for r in rows]
+        # show EVERY matching piece. Grouped stage-wise (process order),
+        # slip number sorted within each stage; any stage not in the
+        # expected list falls back to the end, alphabetically, so nothing
+        # is ever silently dropped if new stage values appear.
+        STAGE_ORDER = ["AGENCY", "TAILOR", "FINISHING", "PACKING"]
+        by_stage: dict[str, list] = {}
+        for r in rows:
+            by_stage.setdefault(r.stage or "OTHER", []).append(r)
+
+        ordered_stages = [s for s in STAGE_ORDER if s in by_stage]
+        ordered_stages += sorted(s for s in by_stage if s not in STAGE_ORDER)
+
+        lines = []
+        for stage in ordered_stages:
+            group = sorted(by_stage[stage], key=lambda r: (r.slip_no or ""))
+            lines.append(f"📍 {stage} ({len(group)})")
+            for r in group:
+                lines.append(f"Slip {r.slip_no} ({r.slip_type})")
+            lines.append("")  # blank line between stage groups
 
         chunks = render_full_list(f"⏳ {status_filter}", lines, total_count=len(rows))
         for chunk in chunks:
