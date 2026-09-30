@@ -267,7 +267,12 @@ async def cmd_order(update: Update, context: ContextTypes.DEFAULT_TYPE):
     pieces are shown minimally (just Order + Slip, per user spec -- these
     are still mid-stitching and don't need a stage label); every other
     stage is shown with its stage label. These pieces are excluded from
-    /pending, /urgent, /tailor and /packing -- /order is their only home."""
+    /pending, /urgent, /tailor and /packing -- /order is their only home.
+    REVISED 30-Sep-2026 (user request, same treatment as /pending): stop at
+    PACKING COMPLETE -- an order piece with packing_complete already set
+    (stage == DELIVERY, only waiting on DELIVERED TO CUSTOMER) no longer
+    counts as pending here either. Ready-to-pack (or earlier) is what
+    matters; delivered_customer doesn't keep it showing up."""
     if not _is_authorized(update):
         await update.message.reply_text("❌ Unauthorized.")
         return
@@ -277,6 +282,7 @@ async def cmd_order(update: Update, context: ContextTypes.DEFAULT_TYPE):
             RecordSnapshot.order_ocs.isnot(None),
             RecordSnapshot.status == "PENDING",
             RecordSnapshot.is_removed == False,  # noqa: E712
+            RecordSnapshot.stage != "DELIVERY",
         ).all()
 
         if not rows:
