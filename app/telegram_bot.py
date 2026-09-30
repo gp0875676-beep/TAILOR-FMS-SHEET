@@ -34,13 +34,32 @@ def _is_authorized(update: Update) -> bool:
     return False
 
 
+def _is_saree_item(item_name) -> bool:
+    """Condition 6 (30-Sep-2026): defines the SAREE category carved out of
+    the whole FMS into its own /saree command. Confirmed with user:
+    -- Matches any item whose name STARTS WITH the word SAREE, whatever the
+       exact type (SAREE, SAREE STITCH, SAREE BLOUSE SET, SAREE(NO LESS)...).
+    -- ALSO matches BLOUSE STITCH specifically (goes together with sarees).
+    -- Explicitly does NOT match RMN-D.SAREE, RM SAREE, or any other
+       RMN/RM-prefixed variant -- those are Ready-Made items, not "real"
+       sarees for this purpose, per user's explicit correction. Since the
+       match is "starts with SAREE", these are naturally excluded already
+       (they start with RMN/RM, not SAREE) -- no extra exclusion needed."""
+    if not item_name:
+        return False
+    name = str(item_name).strip().upper()
+    if name == "BLOUSE STITCH":
+        return True
+    return name.startswith("SAREE")
+
+
 async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not _is_authorized(update):
         await update.message.reply_text("❌ Unauthorized.")
         return
     await update.message.reply_text(
         "🤖 FMS Bot ready.\nSend me the FMS Excel file (.xlsx) to process an upload.\n"
-        "Commands: /status /pending /urgent /overdue /tailor /packing /order "
+        "Commands: /status /pending /urgent /overdue /tailor /packing /order /saree "
         "/summary /lastupload /health /rules /anomalies"
     )
 
@@ -94,7 +113,9 @@ async def cmd_tailor(update: Update, context: ContextTypes.DEFAULT_TYPE):
     whose ALTERATION SLIP DATE is within the last RECENT_ALERT_WINDOW_DAYS
     (default 7) -- no item-count cap.
     REVISED 25-Aug-2026 (Condition 5): order-tagged pieces are excluded
-    entirely -- they now live only in /order."""
+    entirely -- they now live only in /order.
+    REVISED 30-Sep-2026 (Condition 6): SAREE-category pieces are excluded
+    entirely -- they now live only in /saree."""
     if not _is_authorized(update):
         await update.message.reply_text("❌ Unauthorized.")
         return
@@ -110,6 +131,7 @@ async def cmd_tailor(update: Update, context: ContextTypes.DEFAULT_TYPE):
             RecordSnapshot.is_removed == False,  # noqa: E712
             RecordSnapshot.order_ocs.is_(None),
         ).all()
+        rows = [r for r in rows if not _is_saree_item(r.item_name)]
 
         cutoff = business_now() - timedelta(days=settings.RECENT_ALERT_WINDOW_DAYS)
         recent_rows = []
@@ -143,7 +165,9 @@ async def cmd_packing(update: Update, context: ContextTypes.DEFAULT_TYPE):
     not yet complete) -- NO date filter, ALL such pieces regardless of age,
     no item-count cap.
     REVISED 25-Aug-2026 (Condition 5): order-tagged pieces are excluded
-    entirely -- they now live only in /order."""
+    entirely -- they now live only in /order.
+    REVISED 30-Sep-2026 (Condition 6): SAREE-category pieces are excluded
+    entirely -- they now live only in /saree."""
     if not _is_authorized(update):
         await update.message.reply_text("❌ Unauthorized.")
         return
@@ -155,6 +179,7 @@ async def cmd_packing(update: Update, context: ContextTypes.DEFAULT_TYPE):
             RecordSnapshot.is_removed == False,  # noqa: E712
             RecordSnapshot.order_ocs.is_(None),
         ).all()
+        rows = [r for r in rows if not _is_saree_item(r.item_name)]
 
         if not rows:
             await update.message.reply_text("No pieces currently pending at Packing.")
@@ -172,7 +197,9 @@ async def cmd_packing(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def cmd_urgent(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """REVISED 25-Aug-2026 (Condition 5): order-tagged pieces are excluded
-    entirely -- they now live only in /order."""
+    entirely -- they now live only in /order.
+    REVISED 30-Sep-2026 (Condition 6): SAREE-category pieces are excluded
+    entirely -- they now live only in /saree."""
     if not _is_authorized(update):
         await update.message.reply_text("❌ Unauthorized.")
         return
@@ -184,6 +211,7 @@ async def cmd_urgent(update: Update, context: ContextTypes.DEFAULT_TYPE):
             RecordSnapshot.is_removed == False,  # noqa: E712
             RecordSnapshot.order_ocs.is_(None),
         ).all()
+        rows = [r for r in rows if not _is_saree_item(r.item_name)]
 
         if not rows:
             await update.message.reply_text("No urgent pending items.")
@@ -229,7 +257,9 @@ async def _stage_list(update: Update, status_filter: str):
     should not keep a piece showing up. This filter is scoped to /pending
     only -- it does not touch the underlying stage/status fields used by
     RecordSnapshot elsewhere (RULE_007's upstream guard, DQ checks, /order,
-    etc.), so nothing else changes behavior."""
+    etc.), so nothing else changes behavior.
+    REVISED 30-Sep-2026 (Condition 6): SAREE-category pieces (see
+    _is_saree_item) are excluded entirely -- they now live only in /saree."""
     if not _is_authorized(update):
         await update.message.reply_text("❌ Unauthorized.")
         return
@@ -241,6 +271,7 @@ async def _stage_list(update: Update, status_filter: str):
             RecordSnapshot.order_ocs.is_(None),
             RecordSnapshot.stage != "DELIVERY",
         ).all()
+        rows = [r for r in rows if not _is_saree_item(r.item_name)]
 
         if not rows:
             await update.message.reply_text("Nothing to show.")
@@ -272,7 +303,11 @@ async def cmd_order(update: Update, context: ContextTypes.DEFAULT_TYPE):
     PACKING COMPLETE -- an order piece with packing_complete already set
     (stage == DELIVERY, only waiting on DELIVERED TO CUSTOMER) no longer
     counts as pending here either. Ready-to-pack (or earlier) is what
-    matters; delivered_customer doesn't keep it showing up."""
+    matters; delivered_customer doesn't keep it showing up.
+    REVISED 30-Sep-2026 (Condition 6): SAREE-category pieces are excluded
+    entirely, even here -- they now live only in /saree (no overlap exists
+    in the real workbook today, but this keeps the "no other report" rule
+    true if it ever does)."""
     if not _is_authorized(update):
         await update.message.reply_text("❌ Unauthorized.")
         return
@@ -284,6 +319,7 @@ async def cmd_order(update: Update, context: ContextTypes.DEFAULT_TYPE):
             RecordSnapshot.is_removed == False,  # noqa: E712
             RecordSnapshot.stage != "DELIVERY",
         ).all()
+        rows = [r for r in rows if not _is_saree_item(r.item_name)]
 
         if not rows:
             await update.message.reply_text("No pending order pieces.")
@@ -298,6 +334,42 @@ async def cmd_order(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 lines.append(f"Order {r.order_ocs} — Slip {r.slip_no} — {r.stage}")
 
         chunks = render_full_list("📋 ORDER PIECES — PENDING", lines, total_count=len(rows))
+        for chunk in chunks:
+            await update.message.reply_text(chunk)
+    finally:
+        session.close()
+
+
+async def cmd_saree(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """NEW 30-Sep-2026 (Condition 6): carves the whole SAREE category (see
+    _is_saree_item -- any item starting with the word SAREE, plus BLOUSE
+    STITCH; explicitly NOT RMN-D.SAREE / RM-prefixed variants) out of every
+    other report into its own command. Shows every SAREE-category piece
+    that hasn't completed up to PACKING yet -- same "ready to pack" pending
+    definition as /pending and /order (status PENDING, stage != DELIVERY)
+    -- no date filter, no item-count cap. These pieces are excluded
+    entirely from /pending, /urgent, /tailor, /packing and /order --
+    /saree is their only home."""
+    if not _is_authorized(update):
+        await update.message.reply_text("❌ Unauthorized.")
+        return
+    session = get_session()
+    try:
+        rows = session.query(RecordSnapshot).filter(
+            RecordSnapshot.status == "PENDING",
+            RecordSnapshot.is_removed == False,  # noqa: E712
+            RecordSnapshot.stage != "DELIVERY",
+        ).all()
+        rows = [r for r in rows if _is_saree_item(r.item_name)]
+
+        if not rows:
+            await update.message.reply_text("No pending saree pieces.")
+            return
+
+        rows.sort(key=lambda r: (r.stage or "", r.slip_no or ""))
+        lines = [f"Slip {r.slip_no} — {r.item_name} — {r.stage}" for r in rows]
+
+        chunks = render_full_list("🥻 SAREE — PENDING", lines, total_count=len(rows))
         for chunk in chunks:
             await update.message.reply_text(chunk)
     finally:
@@ -583,6 +655,7 @@ def build_app() -> Application:
     application.add_handler(CommandHandler("tailor", cmd_tailor))
     application.add_handler(CommandHandler("packing", cmd_packing))
     application.add_handler(CommandHandler("order", cmd_order))
+    application.add_handler(CommandHandler("saree", cmd_saree))
     application.add_handler(CommandHandler("overdue", cmd_overdue))
     application.add_handler(CommandHandler("lastupload", cmd_lastupload))
     application.add_handler(CommandHandler("summary", cmd_summary))
