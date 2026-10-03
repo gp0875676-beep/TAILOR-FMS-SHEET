@@ -53,6 +53,41 @@ def _is_saree_item(item_name) -> bool:
     return name.startswith("SAREE")
 
 
+# Which raw-data field holds the relevant deadline date for a piece
+# currently sitting at a given stage. Confirmed with user 3-Oct-2026:
+# /pending should show this next to each slip. AGENCY has no dedicated
+# deadline column in the sheet -- SEND TO AGENCY (when it was sent) is the
+# only stage-specific date available, so that's used as a fallback.
+_STAGE_DEADLINE_FIELD = {
+    "AGENCY": "sent_to_agency",
+    "TAILOR": "tailor_deadline",
+    "FINISHING": "finishing_deadline",
+    "PACKING": "qc_deadline",
+}
+
+
+def _stage_deadline_str(raw_json, stage: str) -> str | None:
+    """Reads the CURRENT stage's deadline date out of a RecordSnapshot's
+    raw_json and formats it for display. Returns None if there's no field
+    mapped for this stage or the value is missing/unparseable."""
+    field = _STAGE_DEADLINE_FIELD.get(stage)
+    if not field or not raw_json:
+        return None
+    import json
+    import pandas as pd
+    try:
+        data = json.loads(raw_json)
+        value = data.get(field)
+        if not value:
+            return None
+        dt = pd.to_datetime(value, errors="coerce")
+        if pd.isna(dt):
+            return None
+        return dt.strftime("%d-%b %H:%M")
+    except Exception:
+        return None
+
+
 async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not _is_authorized(update):
         await update.message.reply_text("❌ Unauthorized.")
@@ -264,7 +299,12 @@ async def _stage_list(update: Update, status_filter: str):
     flat slip-number-sorted list -- confirmed with user: AGENCY pieces all
     together, then TAILOR, then FINISHING, then PACKING (process order),
     slip number still the sort within each group. Same info as before,
-    just organized."""
+    just organized.
+    REVISED 3-Oct-2026 (user request): each slip now also shows the
+    deadline date tied to its CURRENT stage (see _stage_deadline_str) --
+    e.g. TAILOR DATE for a piece sitting at TAILOR, FINISHING DATE for one
+    at FINISHING. Nothing else changed -- user explicitly asked for just
+    this one addition."""
     if not _is_authorized(update):
         await update.message.reply_text("❌ Unauthorized.")
         return
@@ -300,7 +340,9 @@ async def _stage_list(update: Update, status_filter: str):
             group = sorted(by_stage[stage], key=lambda r: (r.slip_no or ""))
             lines.append(f"📍 {stage} ({len(group)})")
             for r in group:
-                lines.append(f"Slip {r.slip_no} ({r.slip_type})")
+                date_str = _stage_deadline_str(r.raw_json, stage)
+                suffix = f" — {date_str}" if date_str else ""
+                lines.append(f"Slip {r.slip_no} ({r.slip_type}){suffix}")
             lines.append("")  # blank line between stage groups
 
         chunks = render_full_list(f"⏳ {status_filter}", lines, total_count=len(rows))
