@@ -88,13 +88,29 @@ def _stage_deadline_str(raw_json, stage: str) -> str | None:
         return None
 
 
+# Condition 7 (3-Oct-2026): confirmed Gents item list for the /late report --
+# user picked exactly this set, explicitly excluding GF-RMN SUIT (not
+# confirmed as Gents). Exact-match on the normalized (trimmed, upper-case)
+# item name, same style as _is_saree_item.
+_GENTS_ITEMS = {
+    "KURTA PAJAMA", "G-COAT PENT", "INDO WESTERN", "J-JKT KURTA",
+    "G-SHERWANI", "SHERWANI",
+}
+
+
+def _is_gents_item(item_name) -> bool:
+    if not item_name:
+        return False
+    return str(item_name).strip().upper() in _GENTS_ITEMS
+
+
 async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not _is_authorized(update):
         await update.message.reply_text("❌ Unauthorized.")
         return
     await update.message.reply_text(
         "🤖 FMS Bot ready.\nSend me the FMS Excel file (.xlsx) to process an upload.\n"
-        "Commands: /status /pending /urgent /overdue /tailor /packing /order /saree "
+        "Commands: /status /pending /urgent /overdue /tailor /packing /order /saree /late "
         "/summary /lastupload /health /rules /anomalies"
     )
 
@@ -439,6 +455,89 @@ async def cmd_saree(update: Update, context: ContextTypes.DEFAULT_TYPE):
         session.close()
 
 
+async def cmd_late(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """NEW 3-Oct-2026 (Condition 7 -- a separate, standalone report; user
+    explicitly said not to touch /pending, /tailor, or anything else).
+    CORRECTED 3-Oct-2026 (user caught own mistake): lateness is TAILOR
+    COMPLETE compared against TAILOR DATE -- i.e. the piece must have
+    actually finished tailoring (TAILOR COMPLETE filled in) and done so
+    AFTER its TAILOR DATE deadline (positive = late), same convention as
+    the sheet's own TAILOR HRS column. Confirmed with user: this is NOT
+    restricted to current stage == TAILOR / still-pending pieces (that
+    population can never have TAILOR COMPLETE filled, which was the
+    original mistake) -- a piece counts whether or not FINISHING has since
+    happened too. Window stays as earlier confirmed: rolling last 10 days,
+    based on TAILOR DATE.
+    Excludes, confirmed with user:
+      - order-tagged pieces (ORDER OCS set)
+      - SAREE-category items (_is_saree_item)
+      - Gents items (_is_gents_item): KURTA PAJAMA, G-COAT PENT,
+        INDO WESTERN, J-JKT KURTA, G-SHERWANI, SHERWANI
+      - SLIP TYPE == Urgent, entirely ("totally ignore" -- only Normal
+        slips are considered for this report)
+    Shows each late piece's lateness as hours+minutes (TAILOR COMPLETE -
+    TAILOR DATE)."""
+    if not _is_authorized(update):
+        await update.message.reply_text("❌ Unauthorized.")
+        return
+    import json
+    import pandas as pd
+    from datetime import timedelta
+
+    session = get_session()
+    try:
+        rows = session.query(RecordSnapshot).filter(
+            RecordSnapshot.is_removed == False,  # noqa: E712
+            RecordSnapshot.order_ocs.is_(None),
+        ).all()
+        rows = [
+            r for r in rows
+            if not _is_saree_item(r.item_name)
+            and not _is_gents_item(r.item_name)
+            and (r.slip_type or "").strip().lower() != "urgent"
+        ]
+
+        now = business_now()
+        window_start = now - timedelta(days=10)
+
+        late_rows = []
+        for r in rows:
+            try:
+                data = json.loads(r.raw_json) if r.raw_json else {}
+                deadline = pd.to_datetime(data.get("tailor_deadline"), errors="coerce")
+                completed = pd.to_datetime(data.get("tailor_complete"), errors="coerce")
+                if pd.isna(deadline) or pd.isna(completed):
+                    continue  # piece hasn't finished tailoring yet -- not a "late" completion to report
+                if not (window_start <= deadline <= now):
+                    continue
+                late_minutes = (completed - deadline).total_seconds() / 60
+                if late_minutes <= 0:
+                    continue  # completed on time or early -- not late
+                late_rows.append((r, deadline, completed, late_minutes))
+            except Exception:
+                continue
+
+        if not late_rows:
+            await update.message.reply_text("No late Tailor completions in the last 10 days.")
+            return
+
+        late_rows.sort(key=lambda x: -x[3])  # most late first
+        lines = []
+        for r, deadline, completed, late_minutes in late_rows:
+            h, m = divmod(int(late_minutes), 60)
+            lines.append(
+                f"Slip {r.slip_no} — late by {h}h {m}m "
+                f"(Tailor Date: {deadline.strftime('%d-%b %H:%M')}, "
+                f"Completed: {completed.strftime('%d-%b %H:%M')})"
+            )
+
+        chunks = render_full_list("🔴 LATE — TAILOR (last 10 days)", lines, total_count=len(late_rows))
+        for chunk in chunks:
+            await update.message.reply_text(chunk)
+    finally:
+        session.close()
+
+
 async def cmd_lastupload(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not _is_authorized(update):
         await update.message.reply_text("❌ Unauthorized.")
@@ -719,6 +818,7 @@ def build_app() -> Application:
     application.add_handler(CommandHandler("packing", cmd_packing))
     application.add_handler(CommandHandler("order", cmd_order))
     application.add_handler(CommandHandler("saree", cmd_saree))
+    application.add_handler(CommandHandler("late", cmd_late))
     application.add_handler(CommandHandler("overdue", cmd_overdue))
     application.add_handler(CommandHandler("lastupload", cmd_lastupload))
     application.add_handler(CommandHandler("summary", cmd_summary))
