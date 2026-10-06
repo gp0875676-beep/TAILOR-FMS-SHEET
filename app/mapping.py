@@ -9,6 +9,7 @@ workbook's header text ever changes slightly, only this file needs updating.
 # normalized_name: original_excel_header
 COLUMN_MAP = {
     "item_name": "Item name",
+    "send_for": "SEND FOR",   # NEW 6-Oct-2026 -- next to Item name; only ever filled for SAREE pieces (what the saree is being sent for: stitching, alteration, etc.). Optional/blank for everything else.
     "slip_no": "alteration slip NO",
     "barcode": "BARCODE",
     "rfid": "RFID",
@@ -56,6 +57,7 @@ REVERSE_MAP = {v.strip(): k for k, v in COLUMN_MAP.items()}
 DATA_DICTIONARY = [
     # (original, normalized, dtype, meaning, required, used_by)
     ("Item name", "item_name", "str", "Garment/item description", True, "display"),
+    ("SEND FOR", "send_for", "str", "What a SAREE piece is being sent for (stitching, alteration, etc.); only ever filled for SAREE pieces, blank otherwise", False, "/saree category match"),
     ("alteration slip NO", "slip_no", "int", "Customer slip number; one slip can cover multiple items", True, "identity, display"),
     ("BARCODE", "barcode", "str", "Per-item barcode; unreliable for generic item types (placeholder text)", False, "display, DQ"),
     ("RFID", "rfid", "int", "Per-item RFID tag; primary identity field (98.5% unique)", True, "identity, dedup"),
