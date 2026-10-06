@@ -34,7 +34,23 @@ def _is_authorized(update: Update) -> bool:
     return False
 
 
-def _is_saree_item(item_name) -> bool:
+def _raw_field(raw_json, field):
+    """Reads one normalized field's raw value out of a RecordSnapshot's
+    raw_json. Returns None if missing/blank/unparseable -- never raises."""
+    if not raw_json:
+        return None
+    import json
+    try:
+        data = json.loads(raw_json)
+        value = data.get(field)
+        if value is None or (isinstance(value, str) and not value.strip()):
+            return None
+        return value
+    except Exception:
+        return None
+
+
+def _is_saree_item(item_name, send_for=None) -> bool:
     """Condition 6 (30-Sep-2026): defines the SAREE category carved out of
     the whole FMS into its own /saree command. Confirmed with user:
     -- Matches any item whose name STARTS WITH the word SAREE, whatever the
@@ -44,7 +60,17 @@ def _is_saree_item(item_name) -> bool:
        RMN/RM-prefixed variant -- those are Ready-Made items, not "real"
        sarees for this purpose, per user's explicit correction. Since the
        match is "starts with SAREE", these are naturally excluded already
-       (they start with RMN/RM, not SAREE) -- no extra exclusion needed."""
+       (they start with RMN/RM, not SAREE) -- no extra exclusion needed.
+    REVISED 6-Oct-2026: a new "SEND FOR" column was added to the sheet
+    (next to Item name), filled in ONLY for SAREE pieces (what it's being
+    sent for -- SAREE STITCH, BLOUSE STITCH, SAREE & BLOUSE STITCH,
+    ALTERATION, etc.). Confirmed with user: ANY non-blank value in SEND
+    FOR means saree-category, regardless of item_name -- this is what
+    picks up pieces like a plain "ALTERATION" item_name that wouldn't
+    otherwise match the name-based rule above. SEND FOR has no effect on
+    any other report -- it's read only here, for this one decision."""
+    if send_for:
+        return True
     if not item_name:
         return False
     name = str(item_name).strip().upper()
@@ -182,7 +208,7 @@ async def cmd_tailor(update: Update, context: ContextTypes.DEFAULT_TYPE):
             RecordSnapshot.is_removed == False,  # noqa: E712
             RecordSnapshot.order_ocs.is_(None),
         ).all()
-        rows = [r for r in rows if not _is_saree_item(r.item_name)]
+        rows = [r for r in rows if not _is_saree_item(r.item_name, _raw_field(r.raw_json, "send_for"))]
 
         cutoff = business_now() - timedelta(days=settings.RECENT_ALERT_WINDOW_DAYS)
         recent_rows = []
@@ -230,7 +256,7 @@ async def cmd_packing(update: Update, context: ContextTypes.DEFAULT_TYPE):
             RecordSnapshot.is_removed == False,  # noqa: E712
             RecordSnapshot.order_ocs.is_(None),
         ).all()
-        rows = [r for r in rows if not _is_saree_item(r.item_name)]
+        rows = [r for r in rows if not _is_saree_item(r.item_name, _raw_field(r.raw_json, "send_for"))]
 
         if not rows:
             await update.message.reply_text("No pieces currently pending at Packing.")
@@ -262,7 +288,7 @@ async def cmd_urgent(update: Update, context: ContextTypes.DEFAULT_TYPE):
             RecordSnapshot.is_removed == False,  # noqa: E712
             RecordSnapshot.order_ocs.is_(None),
         ).all()
-        rows = [r for r in rows if not _is_saree_item(r.item_name)]
+        rows = [r for r in rows if not _is_saree_item(r.item_name, _raw_field(r.raw_json, "send_for"))]
 
         if not rows:
             await update.message.reply_text("No urgent pending items.")
@@ -332,7 +358,7 @@ async def _stage_list(update: Update, status_filter: str):
             RecordSnapshot.order_ocs.is_(None),
             RecordSnapshot.stage != "DELIVERY",
         ).all()
-        rows = [r for r in rows if not _is_saree_item(r.item_name)]
+        rows = [r for r in rows if not _is_saree_item(r.item_name, _raw_field(r.raw_json, "send_for"))]
 
         if not rows:
             await update.message.reply_text("Nothing to show.")
@@ -398,7 +424,7 @@ async def cmd_order(update: Update, context: ContextTypes.DEFAULT_TYPE):
             RecordSnapshot.is_removed == False,  # noqa: E712
             RecordSnapshot.stage != "DELIVERY",
         ).all()
-        rows = [r for r in rows if not _is_saree_item(r.item_name)]
+        rows = [r for r in rows if not _is_saree_item(r.item_name, _raw_field(r.raw_json, "send_for"))]
 
         if not rows:
             await update.message.reply_text("No pending order pieces.")
@@ -428,7 +454,12 @@ async def cmd_saree(update: Update, context: ContextTypes.DEFAULT_TYPE):
     definition as /pending and /order (status PENDING, stage != DELIVERY)
     -- no date filter, no item-count cap. These pieces are excluded
     entirely from /pending, /urgent, /tailor, /packing and /order --
-    /saree is their only home."""
+    /saree is their only home.
+    REVISED 6-Oct-2026: also matches via the new SEND FOR column (see
+    _is_saree_item) -- picks up pieces like a plain ALTERATION item_name
+    that's actually saree-linked. When SEND FOR has a value, it's shown
+    next to the item (e.g. "SAREE STITCH", "ALTERATION") since that's the
+    more specific, useful label for these pieces."""
     if not _is_authorized(update):
         await update.message.reply_text("❌ Unauthorized.")
         return
@@ -439,14 +470,18 @@ async def cmd_saree(update: Update, context: ContextTypes.DEFAULT_TYPE):
             RecordSnapshot.is_removed == False,  # noqa: E712
             RecordSnapshot.stage != "DELIVERY",
         ).all()
-        rows = [r for r in rows if _is_saree_item(r.item_name)]
+        rows = [r for r in rows if _is_saree_item(r.item_name, _raw_field(r.raw_json, "send_for"))]
 
         if not rows:
             await update.message.reply_text("No pending saree pieces.")
             return
 
         rows.sort(key=lambda r: (r.stage or "", r.slip_no or ""))
-        lines = [f"Slip {r.slip_no} — {r.item_name} — {r.stage}" for r in rows]
+        lines = []
+        for r in rows:
+            send_for = _raw_field(r.raw_json, "send_for")
+            label = f"{r.item_name} ({send_for})" if send_for else r.item_name
+            lines.append(f"Slip {r.slip_no} — {label} — {r.stage}")
 
         chunks = render_full_list("🥻 SAREE — PENDING", lines, total_count=len(rows))
         for chunk in chunks:
@@ -492,7 +527,7 @@ async def cmd_late(update: Update, context: ContextTypes.DEFAULT_TYPE):
         ).all()
         rows = [
             r for r in rows
-            if not _is_saree_item(r.item_name)
+            if not _is_saree_item(r.item_name, _raw_field(r.raw_json, "send_for"))
             and not _is_gents_item(r.item_name)
             and (r.slip_type or "").strip().lower() != "urgent"
         ]
