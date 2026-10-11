@@ -13,6 +13,7 @@ COLUMN_MAP = {
     "slip_no": "alteration slip NO",
     "barcode": "BARCODE",
     "rfid": "RFID",
+    "article_name": "ARTICLENAME",   # NEW 11-Oct-2026 -- next to RFID; pure reference text, not tied to any rule, stage or report logic. Optional/blank.
     "order_ocs": "ORDER OCS",
     "slip_date": "ALTERATION SLIP DATE",
     "slip_type": "SLIP TYPE",
@@ -61,6 +62,7 @@ DATA_DICTIONARY = [
     ("alteration slip NO", "slip_no", "int", "Customer slip number; one slip can cover multiple items", True, "identity, display"),
     ("BARCODE", "barcode", "str", "Per-item barcode; unreliable for generic item types (placeholder text)", False, "display, DQ"),
     ("RFID", "rfid", "int", "Per-item RFID tag; primary identity field (98.5% unique)", True, "identity, dedup"),
+    ("ARTICLENAME", "article_name", "str", "Free-text reference only -- not used by any rule, stage, or report logic", False, "display (reference only)"),
     ("ORDER OCS", "order_ocs", "float", "Optional order-system reference; mostly null (1407/1505)", False, "display"),
     ("ALTERATION SLIP DATE", "slip_date", "datetime", "Date the alteration slip was raised", True, "SLA baseline"),
     ("SLIP TYPE", "slip_type", "str", "Normal | Urgent", True, "escalation logic"),
