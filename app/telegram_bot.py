@@ -64,12 +64,21 @@ def _is_saree_item(item_name, send_for=None) -> bool:
     REVISED 6-Oct-2026: a new "SEND FOR" column was added to the sheet
     (next to Item name), filled in ONLY for SAREE pieces (what it's being
     sent for -- SAREE STITCH, BLOUSE STITCH, SAREE & BLOUSE STITCH,
-    ALTERATION, etc.). Confirmed with user: ANY non-blank value in SEND
-    FOR means saree-category, regardless of item_name -- this is what
-    picks up pieces like a plain "ALTERATION" item_name that wouldn't
-    otherwise match the name-based rule above. SEND FOR has no effect on
-    any other report -- it's read only here, for this one decision."""
-    if send_for:
+    ALTERATION, etc.). Confirmed with user: ANY real value in SEND FOR
+    means saree-category, regardless of item_name -- this is what picks
+    up pieces like a plain "ALTERATION" item_name that wouldn't otherwise
+    match the name-based rule above. SEND FOR has no effect on any other
+    report -- it's read only here, for this one decision.
+    CORRECTED 6-Oct-2026 (user caught with a real test row): for a non-
+    saree piece (e.g. item_name SUIT), the sheet fills SEND FOR with the
+    literal text "NA" rather than leaving it truly blank -- and some rows
+    leave it truly blank instead. Both must be treated identically (not a
+    real value): blank, None, NaN, whitespace-only, "NA", and "N/A" all
+    count as "no SEND FOR" here, regardless of which one a given row uses."""
+    sf = "" if send_for is None else str(send_for).strip().upper()
+    if sf == "NAN":  # str(float('nan')) == "nan" -- pandas missing value passed raw
+        sf = ""
+    if sf and sf not in ("NA", "N/A"):
         return True
     if not item_name:
         return False
