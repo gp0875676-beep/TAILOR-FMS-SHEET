@@ -145,7 +145,7 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     await update.message.reply_text(
         "🤖 FMS Bot ready.\nSend me the FMS Excel file (.xlsx) to process an upload.\n"
-        "Commands: /status /pending /urgent /overdue /tailor /packing /order /saree /late /latefinishing "
+        "Commands: /status /pending /urgent /overdue /tailor /packing /order /saree /late /latefinishing /late_all /late_all_finishing "
         "/summary /lastupload /health /rules /anomalies"
     )
 
@@ -658,6 +658,91 @@ async def cmd_latefinishing(update: Update, context: ContextTypes.DEFAULT_TYPE):
         session.close()
 
 
+async def _late_all_report(update: Update, stage_label: str, deadline_field: str, complete_field: str):
+    """Shared body for /late_all (TAILOR) and /late_all_finishing (FINISHING).
+
+    Same lateness rule as /late and /latefinishing (COMPLETE - DEADLINE, only
+    positive = late, rolling last 10 days on the DEADLINE date), but with a
+    wider population: Normal AND Urgent slip types both count, and delivered
+    pieces count too (no stage restriction). Only SAREE-category and Gents
+    items are excluded."""
+    import json
+    import pandas as pd
+    from datetime import timedelta
+
+    session = get_session()
+    try:
+        rows = session.query(RecordSnapshot).filter(
+            RecordSnapshot.is_removed == False,  # noqa: E712
+        ).all()
+        rows = [
+            r for r in rows
+            if not _is_saree_item(r.item_name, _raw_field(r.raw_json, "send_for"))
+            and not _is_gents_item(r.item_name)
+        ]
+
+        now = business_now()
+        window_start = now - timedelta(days=10)
+
+        late_rows = []
+        for r in rows:
+            try:
+                data = json.loads(r.raw_json) if r.raw_json else {}
+                deadline = pd.to_datetime(data.get(deadline_field), errors="coerce")
+                completed = pd.to_datetime(data.get(complete_field), errors="coerce")
+                if pd.isna(deadline) or pd.isna(completed):
+                    continue
+                if not (window_start <= deadline <= now):
+                    continue
+                late_minutes = (completed - deadline).total_seconds() / 60
+                if late_minutes <= 0:
+                    continue
+                late_rows.append((r, deadline, completed, late_minutes))
+            except Exception:
+                continue
+
+        if not late_rows:
+            await update.message.reply_text(f"No late {stage_label.title()} completions in the last 10 days.")
+            return
+
+        late_rows.sort(key=lambda x: -x[3])
+        lines = []
+        for r, deadline, completed, late_minutes in late_rows:
+            h, m = divmod(int(late_minutes), 60)
+            urgent_tag = " [URGENT]" if (r.slip_type or "").strip().lower() == "urgent" else ""
+            lines.append(
+                f"Slip {r.slip_no}{urgent_tag} — late by {h}h {m}m "
+                f"({stage_label.title()} Date: {deadline.strftime('%d-%b %H:%M')}, "
+                f"Completed: {completed.strftime('%d-%b %H:%M')})"
+            )
+
+        chunks = render_full_list(
+            f"🔴 LATE ALL — {stage_label} (last 10 days)", lines, total_count=len(late_rows)
+        )
+        for chunk in chunks:
+            await update.message.reply_text(chunk)
+    finally:
+        session.close()
+
+
+async def cmd_late_all(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """NEW 16-Oct-2026 -- /late_all: TAILOR lateness, Normal + Urgent, delivered
+    or not. Excludes only SAREE and Gents items."""
+    if not _is_authorized(update):
+        await update.message.reply_text("❌ Unauthorized.")
+        return
+    await _late_all_report(update, "TAILOR", "tailor_deadline", "tailor_complete")
+
+
+async def cmd_late_all_finishing(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """NEW 16-Oct-2026 -- /late_all_finishing: FINISHING lateness, Normal + Urgent,
+    delivered or not. Excludes only SAREE and Gents items."""
+    if not _is_authorized(update):
+        await update.message.reply_text("❌ Unauthorized.")
+        return
+    await _late_all_report(update, "FINISHING", "finishing_deadline", "finishing_complete")
+
+
 async def cmd_lastupload(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not _is_authorized(update):
         await update.message.reply_text("❌ Unauthorized.")
@@ -940,6 +1025,8 @@ def build_app() -> Application:
     application.add_handler(CommandHandler("saree", cmd_saree))
     application.add_handler(CommandHandler("late", cmd_late))
     application.add_handler(CommandHandler("latefinishing", cmd_latefinishing))
+    application.add_handler(CommandHandler("late_all", cmd_late_all))
+    application.add_handler(CommandHandler("late_all_finishing", cmd_late_all_finishing))
     application.add_handler(CommandHandler("overdue", cmd_overdue))
     application.add_handler(CommandHandler("lastupload", cmd_lastupload))
     application.add_handler(CommandHandler("summary", cmd_summary))
