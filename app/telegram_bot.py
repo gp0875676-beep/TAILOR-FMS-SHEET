@@ -662,13 +662,12 @@ async def _late_all_report(update: Update, stage_label: str, deadline_field: str
     """Shared body for /late_all (TAILOR) and /late_all_finishing (FINISHING).
 
     Same lateness rule as /late and /latefinishing (COMPLETE - DEADLINE, only
-    positive = late, rolling last 10 days on the DEADLINE date), but with a
-    wider population: Normal AND Urgent slip types both count, and delivered
-    pieces count too (no stage restriction). Only SAREE-category and Gents
-    items are excluded."""
+    positive = late), but: Normal AND Urgent both count, delivered pieces
+    count too, and there is NO 10-day window -- everything in the uploaded
+    data is checked. Only SAREE-category and Gents items are excluded.
+    Each entry shows slip no, late time, article name, deadline/completion."""
     import json
     import pandas as pd
-    from datetime import timedelta
 
     session = get_session()
     try:
@@ -681,9 +680,6 @@ async def _late_all_report(update: Update, stage_label: str, deadline_field: str
             and not _is_gents_item(r.item_name)
         ]
 
-        now = business_now()
-        window_start = now - timedelta(days=10)
-
         late_rows = []
         for r in rows:
             try:
@@ -691,8 +687,6 @@ async def _late_all_report(update: Update, stage_label: str, deadline_field: str
                 deadline = pd.to_datetime(data.get(deadline_field), errors="coerce")
                 completed = pd.to_datetime(data.get(complete_field), errors="coerce")
                 if pd.isna(deadline) or pd.isna(completed):
-                    continue
-                if not (window_start <= deadline <= now):
                     continue
                 late_minutes = (completed - deadline).total_seconds() / 60
                 if late_minutes <= 0:
@@ -702,7 +696,7 @@ async def _late_all_report(update: Update, stage_label: str, deadline_field: str
                 continue
 
         if not late_rows:
-            await update.message.reply_text(f"No late {stage_label.title()} completions in the last 10 days.")
+            await update.message.reply_text(f"No late {stage_label.title()} completions found.")
             return
 
         late_rows.sort(key=lambda x: -x[3])
@@ -710,14 +704,14 @@ async def _late_all_report(update: Update, stage_label: str, deadline_field: str
         for r, deadline, completed, late_minutes in late_rows:
             h, m = divmod(int(late_minutes), 60)
             urgent_tag = " [URGENT]" if (r.slip_type or "").strip().lower() == "urgent" else ""
+            article = _raw_field(r.raw_json, "article_name") or r.item_name or "-"
             lines.append(
-                f"Slip {r.slip_no}{urgent_tag} — late by {h}h {m}m "
-                f"({stage_label.title()} Date: {deadline.strftime('%d-%b %H:%M')}, "
-                f"Completed: {completed.strftime('%d-%b %H:%M')})"
+                f"Slip {r.slip_no}{urgent_tag} — {h}h {m}m late — {article}\n"
+                f"   Due {deadline.strftime('%d-%b %H:%M')} → Done {completed.strftime('%d-%b %H:%M')}\n"
             )
 
         chunks = render_full_list(
-            f"🔴 LATE ALL — {stage_label} (last 10 days)", lines, total_count=len(late_rows)
+            f"🔴 LATE ALL — {stage_label}", lines, total_count=len(late_rows)
         )
         for chunk in chunks:
             await update.message.reply_text(chunk)
