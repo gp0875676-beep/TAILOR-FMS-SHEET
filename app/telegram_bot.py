@@ -145,7 +145,7 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     await update.message.reply_text(
         "🤖 FMS Bot ready.\nSend me the FMS Excel file (.xlsx) to process an upload.\n"
-        "Commands: /status /pending /urgent /overdue /tailor /packing /order /saree /late /latefinishing /late_all /late_all_finishing /tailor_reminder "
+        "Commands: /status /pending /urgent /overdue /tailor /packing /order /saree /late /latefinishing /late_all /late_all_finishing /tailor_reminder /finishing_reminder "
         "/summary /lastupload /health /rules /anomalies"
     )
 
@@ -825,7 +825,7 @@ def _tr_order_no(v) -> str:
         return str(v)
 
 
-def _tr_build_xlsx(normal, orders) -> bytes:
+def _tr_build_xlsx(normal, orders, dept="TAILOR") -> bytes:
     """Excel in the user's 'Tailor Pending Reminders' layout:
     Department | Slip No. | Priority | Item Type | Date / Time, plus Delay and
     Order No. appended after it."""
@@ -856,9 +856,9 @@ def _tr_build_xlsx(normal, orders) -> bytes:
             c.font, c.border = body_font, border
 
     for r, deadline, delay in normal:
-        add("TAILOR", r, deadline, delay, None)
+        add(dept, r, deadline, delay, None)
     for r, deadline, delay in orders:
-        add("TAILOR (ORDER)", r, deadline, delay, _tr_order_no(r.order_ocs))
+        add(f"{dept} (ORDER)", r, deadline, delay, _tr_order_no(r.order_ocs))
     for col, w in zip("ABCDEFG", (22, 12, 12, 24, 20, 18, 14)):
         ws.column_dimensions[col].width = w
     buf = io.BytesIO()
@@ -904,6 +904,89 @@ async def cmd_tailor_reminder(update: Update, context: ContextTypes.DEFAULT_TYPE
         data = _tr_build_xlsx(normal, orders)
         await update.message.reply_document(
             document=io.BytesIO(data), filename="Tailor_Pending_Reminders.xlsx"
+        )
+    finally:
+        session.close()
+
+
+def _fr_collect(session):
+    """/finishing_reminder population. Returns (normal_rows, order_rows) like
+    _tr_collect, but for FINISHING: TAILOR COMPLETE set (piece reached
+    finishing), FINISHING DATE set, FINISHING COMPLETE blank. Delay = now -
+    FINISHING DATE. Only the named RM/RMN-type items (+ order pieces) count;
+    EXCLUDED items and everything saree-related or SUIT-list are ignored
+    entirely."""
+    import json
+    import pandas as pd
+
+    now = business_now()
+    normal, orders = [], []
+    for r in session.query(RecordSnapshot).filter(RecordSnapshot.is_removed == False).all():  # noqa: E712
+        try:
+            data = json.loads(r.raw_json) if r.raw_json else {}
+            name = " ".join(str(r.item_name or "").replace("\xa0", " ").split()).upper()
+            if name in _TR_EXCLUDED_ITEMS:
+                continue
+            group = _tr_group(r.item_name, _raw_field(r.raw_json, "send_for"))
+            if group == "SAREE_SUIT":
+                continue  # saree / related / suits: ignored for finishing
+            is_order = r.order_ocs is not None
+            if not is_order and group != "NAMED":
+                continue
+            deadline = pd.to_datetime(data.get("finishing_deadline"), errors="coerce")
+            if pd.isna(deadline):
+                continue
+            if pd.isna(pd.to_datetime(data.get("tailor_complete"), errors="coerce")):
+                continue
+            if pd.notna(pd.to_datetime(data.get("finishing_complete"), errors="coerce")):
+                continue
+            delay = (now - deadline).total_seconds() / 60
+            row = (r, deadline, delay if delay > 0 else None)
+            (orders if is_order else normal).append(row)
+        except Exception:
+            continue
+    key = lambda x: (-(x[2] or 0), x[1])
+    normal.sort(key=key)
+    orders.sort(key=key)
+    return normal, orders
+
+
+async def cmd_finishing_reminder(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """NEW 17-Oct-2026 -- /finishing_reminder: same style as /tailor_reminder
+    but for FINISHING (tailor done, FINISHING COMPLETE blank), lateness vs
+    FINISHING DATE. Order pieces separate. Excel attached."""
+    if not _is_authorized(update):
+        await update.message.reply_text("❌ Unauthorized.")
+        return
+    import io
+    session = get_session()
+    try:
+        normal, orders = _fr_collect(session)
+        if not normal and not orders:
+            await update.message.reply_text("No pending Finishing reminders.")
+            return
+
+        if normal:
+            lines = [
+                f"Slip {r.slip_no} ({r.slip_type}) — {r.item_name} — "
+                f"{deadline.strftime('%d-%b %H:%M')} — {_tr_delay_str(delay)}"
+                for r, deadline, delay in normal
+            ]
+            for chunk in render_full_list("⏰ FINISHING REMINDER — PENDING", lines, total_count=len(normal)):
+                await update.message.reply_text(chunk)
+
+        if orders:
+            olines = [
+                f"Order {_tr_order_no(r.order_ocs)} — Slip {r.slip_no} ({r.slip_type}) — {r.item_name} — "
+                f"{deadline.strftime('%d-%b %H:%M')} — {_tr_delay_str(delay)}"
+                for r, deadline, delay in orders
+            ]
+            for chunk in render_full_list("📋 FINISHING REMINDER — ORDER PIECES", olines, total_count=len(orders)):
+                await update.message.reply_text(chunk)
+
+        data = _tr_build_xlsx(normal, orders, dept="FINISHING")
+        await update.message.reply_document(
+            document=io.BytesIO(data), filename="Finishing_Pending_Reminders.xlsx"
         )
     finally:
         session.close()
@@ -1194,6 +1277,7 @@ def build_app() -> Application:
     application.add_handler(CommandHandler("late_all", cmd_late_all))
     application.add_handler(CommandHandler("late_all_finishing", cmd_late_all_finishing))
     application.add_handler(CommandHandler("tailor_reminder", cmd_tailor_reminder))
+    application.add_handler(CommandHandler("finishing_reminder", cmd_finishing_reminder))
     application.add_handler(CommandHandler("overdue", cmd_overdue))
     application.add_handler(CommandHandler("lastupload", cmd_lastupload))
     application.add_handler(CommandHandler("summary", cmd_summary))
