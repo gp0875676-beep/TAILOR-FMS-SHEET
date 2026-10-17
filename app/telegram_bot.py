@@ -145,7 +145,7 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     await update.message.reply_text(
         "🤖 FMS Bot ready.\nSend me the FMS Excel file (.xlsx) to process an upload.\n"
-        "Commands: /status /pending /urgent /overdue /tailor /packing /order /saree /late /latefinishing /late_all /late_all_finishing "
+        "Commands: /status /pending /urgent /overdue /tailor /packing /order /saree /late /latefinishing /late_all /late_all_finishing /tailor_reminder "
         "/summary /lastupload /health /rules /anomalies"
     )
 
@@ -443,10 +443,11 @@ async def cmd_order(update: Update, context: ContextTypes.DEFAULT_TYPE):
         rows.sort(key=lambda r: (r.stage or "", r.slip_no or ""))
         lines = []
         for r in rows:
+            item_str = f" — {r.item_name}" if r.item_name else ""
             if r.stage == "TAILOR":
-                lines.append(f"Order {r.order_ocs} — Slip {r.slip_no}")
+                lines.append(f"Order {r.order_ocs} — Slip {r.slip_no}{item_str}")
             else:
-                lines.append(f"Order {r.order_ocs} — Slip {r.slip_no} — {r.stage}")
+                lines.append(f"Order {r.order_ocs} — Slip {r.slip_no}{item_str} — {r.stage}")
 
         chunks = render_full_list("📋 ORDER PIECES — PENDING", lines, total_count=len(rows))
         for chunk in chunks:
@@ -738,6 +739,172 @@ async def cmd_late_all_finishing(update: Update, context: ContextTypes.DEFAULT_T
     await _late_all_report(update, "FINISHING", "finishing_deadline", "finishing_complete")
 
 
+# --- /tailor_reminder (NEW 17-Oct-2026) ------------------------------------
+_TR_NAMED_ITEMS = {
+    "RMN-LEHENGA", "RMN-D.SAREE", "RMN-DRESS", "RMN-GOWN", "GF-RMN SUIT",
+    "LEHENGA-BD", "BD-PEPLUM", "DRESS", "RMN-SUIT",
+}
+_TR_SAREE_SUIT_ITEMS = {
+    "SAREE", "SAREE BLOUSE SET", "SAREE STITCH", "BLOUSE STITCH",
+    "SUIT", "SUIT-STICH", "SUIT-STITCH",
+}
+_TR_EXCLUDED_ITEMS = {"J-JKT KURTA", "G-SHERWANI", "INDO WESTERN", "K-KP SET", "FABRIC"}
+
+
+def _tr_group(item_name) -> str | None:
+    """Which /tailor_reminder bucket an item belongs to: 'NAMED' (RMN/RM etc.,
+    needs tailor scan), 'SAREE_SUIT' (needs only a TAILOR DATE), or None."""
+    import re
+    name = " ".join(str(item_name or "").replace("\xa0", " ").split()).upper()
+    if not name or name in _TR_EXCLUDED_ITEMS:
+        return None
+    if name in _TR_NAMED_ITEMS or re.match(r"^RMN?[\s\-]", name):
+        return "NAMED"
+    if name in _TR_SAREE_SUIT_ITEMS:
+        return "SAREE_SUIT"
+    return None
+
+
+def _tr_collect(session):
+    """Returns (normal_rows, order_rows); each row =
+    (record, tailor_deadline, delay_minutes_or_None). Pending = TAILOR DATE set,
+    TAILOR COMPLETE blank, FINISHING COMPLETE blank (finishing already done =
+    ignored). NAMED items and order pieces additionally need the tailor scan
+    (RECEIVED BY TAILOR); SAREE/SUIT items only need TAILOR DATE."""
+    import json
+    import pandas as pd
+
+    now = business_now()
+    normal, orders = [], []
+    for r in session.query(RecordSnapshot).filter(RecordSnapshot.is_removed == False).all():  # noqa: E712
+        try:
+            data = json.loads(r.raw_json) if r.raw_json else {}
+            name = " ".join(str(r.item_name or "").replace("\xa0", " ").split()).upper()
+            if name in _TR_EXCLUDED_ITEMS:
+                continue
+            is_order = r.order_ocs is not None
+            group = _tr_group(r.item_name)
+            if not is_order and group is None:
+                continue
+            deadline = pd.to_datetime(data.get("tailor_deadline"), errors="coerce")
+            if pd.isna(deadline):
+                continue
+            if pd.notna(pd.to_datetime(data.get("tailor_complete"), errors="coerce")):
+                continue
+            if pd.notna(pd.to_datetime(data.get("finishing_complete"), errors="coerce")):
+                continue
+            needs_scan = is_order or group == "NAMED"
+            if needs_scan and pd.isna(pd.to_datetime(data.get("received_by_tailor"), errors="coerce")):
+                continue
+            delay = (now - deadline).total_seconds() / 60
+            row = (r, deadline, delay if delay > 0 else None)
+            (orders if is_order else normal).append(row)
+        except Exception:
+            continue
+    key = lambda x: (-(x[2] or 0), x[1])
+    normal.sort(key=key)
+    orders.sort(key=key)
+    return normal, orders
+
+
+def _tr_delay_str(delay) -> str:
+    if delay is None:
+        return "not yet due"
+    h, m = divmod(int(delay), 60)
+    return f"{h}h {m}m late"
+
+
+def _tr_order_no(v) -> str:
+    try:
+        return str(int(float(v)))
+    except Exception:
+        return str(v)
+
+
+def _tr_build_xlsx(normal, orders) -> bytes:
+    """Excel in the user's 'Tailor Pending Reminders' layout:
+    Department | Slip No. | Priority | Item Type | Date / Time, plus Delay and
+    Order No. appended after it."""
+    import io
+    from openpyxl import Workbook
+    from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
+
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "Sheet1"
+    headers = ["Department", "Slip No.", "Priority", "Item Type", "Date / Time", "Delay", "Order No."]
+    head_font = Font(name="Calibri", size=16, bold=True, color="FFFFFFFF")
+    head_fill = PatternFill("solid", fgColor="FF1F4E78")
+    thin = Side(style="thin")
+    border = Border(left=thin, right=thin, top=thin, bottom=thin)
+    for i, h in enumerate(headers, 1):
+        c = ws.cell(row=1, column=i, value=h)
+        c.font, c.fill, c.border = head_font, head_fill, border
+        c.alignment = Alignment(horizontal="center")
+    body_font = Font(name="Calibri", size=16)
+
+    def add(dept, r, deadline, delay, order_no):
+        ws.append([
+            dept, r.slip_no, r.slip_type, r.item_name,
+            deadline.strftime("%d-%b %H:%M"), _tr_delay_str(delay), order_no,
+        ])
+        for c in ws[ws.max_row]:
+            c.font, c.border = body_font, border
+
+    for r, deadline, delay in normal:
+        add("TAILOR", r, deadline, delay, None)
+    for r, deadline, delay in orders:
+        add("TAILOR (ORDER)", r, deadline, delay, _tr_order_no(r.order_ocs))
+    for col, w in zip("ABCDEFG", (22, 12, 12, 24, 20, 18, 14)):
+        ws.column_dimensions[col].width = w
+    buf = io.BytesIO()
+    wb.save(buf)
+    return buf.getvalue()
+
+
+async def cmd_tailor_reminder(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """NEW 17-Oct-2026 -- /tailor_reminder: pieces scanned/assigned to tailor
+    whose TAILOR COMPLETE is still blank (and FINISHING COMPLETE blank), with
+    the TAILOR DATE and how late they are. Order pieces listed separately.
+    Also attaches an Excel in the user's reminder layout."""
+    if not _is_authorized(update):
+        await update.message.reply_text("❌ Unauthorized.")
+        return
+    import io
+    session = get_session()
+    try:
+        normal, orders = _tr_collect(session)
+        if not normal and not orders:
+            await update.message.reply_text("No pending Tailor reminders.")
+            return
+
+        lines = []
+        for r, deadline, delay in normal:
+            lines.append(
+                f"Slip {r.slip_no} ({r.slip_type}) — {r.item_name} — "
+                f"{deadline.strftime('%d-%b %H:%M')} — {_tr_delay_str(delay)}"
+            )
+        if normal:
+            for chunk in render_full_list("⏰ TAILOR REMINDER — PENDING", lines, total_count=len(normal)):
+                await update.message.reply_text(chunk)
+
+        if orders:
+            olines = [
+                f"Order {_tr_order_no(r.order_ocs)} — Slip {r.slip_no} ({r.slip_type}) — {r.item_name} — "
+                f"{deadline.strftime('%d-%b %H:%M')} — {_tr_delay_str(delay)}"
+                for r, deadline, delay in orders
+            ]
+            for chunk in render_full_list("📋 TAILOR REMINDER — ORDER PIECES", olines, total_count=len(orders)):
+                await update.message.reply_text(chunk)
+
+        data = _tr_build_xlsx(normal, orders)
+        await update.message.reply_document(
+            document=io.BytesIO(data), filename="Tailor_Pending_Reminders.xlsx"
+        )
+    finally:
+        session.close()
+
+
 async def cmd_lastupload(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not _is_authorized(update):
         await update.message.reply_text("❌ Unauthorized.")
@@ -1022,6 +1189,7 @@ def build_app() -> Application:
     application.add_handler(CommandHandler("latefinishing", cmd_latefinishing))
     application.add_handler(CommandHandler("late_all", cmd_late_all))
     application.add_handler(CommandHandler("late_all_finishing", cmd_late_all_finishing))
+    application.add_handler(CommandHandler("tailor_reminder", cmd_tailor_reminder))
     application.add_handler(CommandHandler("overdue", cmd_overdue))
     application.add_handler(CommandHandler("lastupload", cmd_lastupload))
     application.add_handler(CommandHandler("summary", cmd_summary))
