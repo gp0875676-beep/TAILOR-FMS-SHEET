@@ -393,7 +393,8 @@ async def _stage_list(update: Update, status_filter: str):
             for r in group:
                 date_str = _stage_deadline_str(r.raw_json, stage)
                 suffix = f" — {date_str}" if date_str else ""
-                lines.append(f"Slip {r.slip_no} ({r.slip_type}){suffix}")
+                item_str = f" — {r.item_name}" if r.item_name else ""
+                lines.append(f"Slip {r.slip_no} ({r.slip_type}){item_str}{suffix}")
             lines.append("")  # blank line between stage groups
 
         chunks = render_full_list(f"⏳ {status_filter}", lines, total_count=len(rows))
