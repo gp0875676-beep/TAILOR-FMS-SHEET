@@ -751,17 +751,21 @@ _TR_SAREE_SUIT_ITEMS = {
 _TR_EXCLUDED_ITEMS = {"J-JKT KURTA", "G-SHERWANI", "INDO WESTERN", "K-KP SET", "FABRIC"}
 
 
-def _tr_group(item_name) -> str | None:
+def _tr_group(item_name, send_for=None) -> str | None:
     """Which /tailor_reminder bucket an item belongs to: 'NAMED' (RMN/RM etc.,
     needs tailor scan), 'SAREE_SUIT' (needs only a TAILOR DATE), or None."""
     import re
     name = " ".join(str(item_name or "").replace("\xa0", " ").split()).upper()
     if not name or name in _TR_EXCLUDED_ITEMS:
         return None
+    # Anything saree-related (name has SAREE/SARI/BLOUSE, or SEND FOR marks it
+    # saree-category) or a SUIT-list item: only needs a TAILOR DATE.
+    if (name in _TR_SAREE_SUIT_ITEMS
+            or re.search(r"SAREE|SARI|BLOUSE", name)
+            or _is_saree_item(item_name, send_for)):
+        return "SAREE_SUIT"
     if name in _TR_NAMED_ITEMS or re.match(r"^RMN?[\s\-]", name):
         return "NAMED"
-    if name in _TR_SAREE_SUIT_ITEMS:
-        return "SAREE_SUIT"
     return None
 
 
@@ -783,7 +787,7 @@ def _tr_collect(session):
             if name in _TR_EXCLUDED_ITEMS:
                 continue
             is_order = r.order_ocs is not None
-            group = _tr_group(r.item_name)
+            group = _tr_group(r.item_name, _raw_field(r.raw_json, "send_for"))
             if not is_order and group is None:
                 continue
             deadline = pd.to_datetime(data.get("tailor_deadline"), errors="coerce")
